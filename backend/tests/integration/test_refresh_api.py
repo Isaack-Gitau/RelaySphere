@@ -12,7 +12,7 @@ from app.db.session import get_db_session
 from app.main import app
 from app.models.refresh_session import RefreshSession
 from app.models.user import User
-from app.security.tokens import decode_access_token
+from app.security.tokens import create_access_token, decode_access_token
 from app.services.refresh_sessions import (
     create_refresh_session,
     hash_refresh_token,
@@ -107,7 +107,6 @@ def test_refresh_rotates_cookie_and_returns_access_token(
     remaining_seconds = int((expires_at - datetime.now(UTC)).total_seconds())
     assert 0 < max_age <= remaining_seconds
     assert record.token_hash != hash_refresh_token(original_token)
-    assert record.revoked_at is None
     assert record.revoked_at is None
 
 
@@ -204,3 +203,81 @@ def test_logout_succeeds_with_unknown_refresh_token(
     cookie = response.headers.get("set-cookie", "").lower()
     assert "relaysphere_refresh=" in cookie
     assert "max-age=0" in cookie
+
+
+def test_logout_invalidates_access_token_immediately(
+    api_client: TestClient,
+    db_session: Session,
+    token_settings: None,
+) -> None:
+    """Reject an access token as soon as its refresh session is logged out."""
+    user = create_verified_user(db_session)
+    refresh_token = create_refresh_session(db_session, user.id)
+
+    record = db_session.scalar(
+        select(RefreshSession).where(RefreshSession.token_hash == hash_refresh_token(refresh_token))
+    )
+    assert record is not None
+
+    access_token = create_access_token(
+        subject=str(user.id),
+        session_id=str(record.id),
+    )
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    before_logout = api_client.get("/api/v1/auth/me", headers=headers)
+    assert before_logout.status_code == 200
+
+    api_client.cookies.set("relaysphere_refresh", refresh_token)
+    logout_response = api_client.post("/api/v1/auth/logout")
+    assert logout_response.status_code == 200
+
+    after_logout = api_client.get("/api/v1/auth/me", headers=headers)
+    assert after_logout.status_code == 401
+
+
+def test_logout_does_not_revoke_another_device_session(
+    api_client: TestClient,
+    db_session: Session,
+    token_settings: None,
+) -> None:
+    """Logging out one device must leave another device's session active."""
+    user = create_verified_user(db_session)
+
+    first_refresh_token = create_refresh_session(db_session, user.id)
+    second_refresh_token = create_refresh_session(db_session, user.id)
+
+    first_record = db_session.scalar(
+        select(RefreshSession).where(
+            RefreshSession.token_hash == hash_refresh_token(first_refresh_token)
+        )
+    )
+    second_record = db_session.scalar(
+        select(RefreshSession).where(
+            RefreshSession.token_hash == hash_refresh_token(second_refresh_token)
+        )
+    )
+    assert first_record is not None
+    assert second_record is not None
+    assert first_record.id != second_record.id
+
+    second_access_token = create_access_token(
+        subject=str(user.id),
+        session_id=str(second_record.id),
+    )
+
+    api_client.cookies.set("relaysphere_refresh", first_refresh_token)
+    logout_response = api_client.post("/api/v1/auth/logout")
+    assert logout_response.status_code == 200
+
+    db_session.refresh(first_record)
+    db_session.refresh(second_record)
+
+    assert first_record.revoked_at is not None
+    assert second_record.revoked_at is None
+
+    second_device_response = api_client.get(
+        "/api/v1/auth/me",
+        headers={"Authorization": f"Bearer {second_access_token}"},
+    )
+    assert second_device_response.status_code == 200

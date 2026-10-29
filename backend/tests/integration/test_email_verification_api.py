@@ -1,3 +1,4 @@
+import hashlib
 import uuid
 from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
@@ -164,3 +165,149 @@ def test_verify_email_endpoint_requires_token_field(
     )
 
     assert response.status_code == 422
+
+
+RESEND_VERIFICATION_MESSAGE = (
+    "If an eligible account exists, a verification email will be sent shortly."
+)
+
+
+def test_resend_verification_creates_replacement_token(
+    api_client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = create_unverified_user(db_session)
+    old_raw_token = create_verification_token(db_session, user.id)
+
+    old_record = db_session.scalar(
+        select(EmailVerificationToken).where(
+            EmailVerificationToken.token_hash == hashlib.sha256(old_raw_token.encode()).hexdigest()
+        )
+    )
+    assert old_record is not None
+
+    # simulate a token created more than 120 seconds ago.
+    old_record.created_at = datetime.now(UTC) - timedelta(minutes=3)
+    db_session.flush()
+
+    sent_emails: list[tuple[str, str]] = []
+
+    def capture_email(recipient_email: str, raw_token: str) -> None:
+        sent_emails.append((recipient_email, raw_token))
+
+    monkeypatch.setattr(
+        "app.api.v1.endpoints.auth.send_verification_email",
+        capture_email,
+    )
+
+    response = api_client.post(
+        "/api/v1/auth/resend-verification",
+        json={"email": user.email},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"message": RESEND_VERIFICATION_MESSAGE}
+    assert len(sent_emails) == 1
+    assert sent_emails[0][0] == user.email
+
+    old_record = db_session.scalar(
+        select(EmailVerificationToken).where(
+            EmailVerificationToken.token_hash == hashlib.sha256(old_raw_token.encode()).hexdigest()
+        )
+    )
+    new_record = db_session.scalar(
+        select(EmailVerificationToken).where(
+            EmailVerificationToken.token_hash
+            == hashlib.sha256(sent_emails[0][1].encode()).hexdigest()
+        )
+    )
+
+    assert old_record is not None
+    assert old_record.expires_at <= datetime.now(UTC)
+
+    assert new_record is not None
+    assert new_record.user_id == user.id
+    assert new_record.used_at is None
+    assert new_record.expires_at > datetime.now(UTC)
+
+
+def test_resend_verification_unknown_email_returns_generic_response(
+    api_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent_emails: list[tuple[str, str]] = []
+
+    def capture_email(recipient_email: str, raw_token: str) -> None:
+        sent_emails.append((recipient_email, raw_token))
+
+    monkeypatch.setattr(
+        "app.api.v1.endpoints.auth.send_verification_email",
+        capture_email,
+    )
+
+    response = api_client.post(
+        "/api/v1/auth/resend-verification",
+        json={"email": "unknown@example.com"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"message": RESEND_VERIFICATION_MESSAGE}
+    assert sent_emails == []
+
+
+def test_resend_verification_verified_account_returns_generic_response(
+    api_client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = create_unverified_user(db_session)
+    user.email_verified_at = datetime.now(UTC)
+    db_session.flush()
+
+    sent_emails: list[tuple[str, str]] = []
+
+    def capture_email(recipient_email: str, raw_token: str) -> None:
+        sent_emails.append((recipient_email, raw_token))
+
+    monkeypatch.setattr(
+        "app.api.v1.endpoints.auth.send_verification_email",
+        capture_email,
+    )
+
+    response = api_client.post(
+        "/api/v1/auth/resend-verification",
+        json={"email": user.email},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"message": RESEND_VERIFICATION_MESSAGE}
+    assert sent_emails == []
+
+
+def test_resend_verification_cooldown_returns_generic_response(
+    api_client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = create_unverified_user(db_session)
+    create_verification_token(db_session, user.id)
+
+    sent_emails: list[tuple[str, str]] = []
+
+    def capture_email(recipient_email: str, raw_token: str) -> None:
+        sent_emails.append((recipient_email, raw_token))
+
+    monkeypatch.setattr(
+        "app.api.v1.endpoints.auth.send_verification_email",
+        capture_email,
+    )
+
+    response = api_client.post(
+        "/api/v1/auth/resend-verification",
+        json={"email": user.email},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"message": RESEND_VERIFICATION_MESSAGE}
+    assert sent_emails == []

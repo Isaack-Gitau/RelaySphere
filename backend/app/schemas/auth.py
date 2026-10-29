@@ -66,6 +66,24 @@ class VerifyEmailResponse(BaseModel):
     email_verified_at: datetime
 
 
+class ResendVerificationRequest(BaseModel):
+    """Validate a request to resend an email verification message."""
+
+    email: EmailStr
+
+    @field_validator("email", mode="after")
+    @classmethod
+    def normalize_email(cls, value: EmailStr) -> str:
+        """Normalize email addresses for consistent account lookup."""
+        return str(value).lower()
+
+
+class ResendVerificationResponse(BaseModel):
+    """Return a generic response without revealing account status."""
+
+    message: str
+
+
 class LoginRequest(BaseModel):
     """Validate a login request."""
 

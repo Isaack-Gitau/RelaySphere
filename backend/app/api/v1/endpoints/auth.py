@@ -16,12 +16,15 @@ from app.schemas.auth import (
     LoginResponse,
     RegisterRequest,
     RegisterResponse,
+    ResendVerificationRequest,
+    ResendVerificationResponse,
     VerifyEmailRequest,
     VerifyEmailResponse,
 )
 from app.security.tokens import create_access_token
 from app.services.email_verification import (
     EmailVerificationError,
+    resend_verification_token,
     verify_email_token,
 )
 from app.services.login import (
@@ -87,6 +90,39 @@ def register(
 
     send_verification_email(user.email, raw_token)
     return RegisterResponse.model_validate(user)
+
+
+@router.post(
+    "/resend-verification",
+    response_model=ResendVerificationResponse,
+    status_code=status.HTTP_200_OK,
+)
+def resend_verification(
+    request: ResendVerificationRequest,
+    session: Session = Depends(get_db_session),  # noqa: B008
+) -> ResendVerificationResponse:
+    """Resend verification email without revealing account status."""
+    settings = get_settings()
+
+    if settings.environment.lower() not in {"development", "testing"}:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Email verification delivery is not configured for this environment.",
+        )
+
+    try:
+        raw_token = resend_verification_token(session, str(request.email))
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+
+    if raw_token is not None:
+        send_verification_email(str(request.email), raw_token)
+
+    return ResendVerificationResponse(
+        message="If an eligible account exists, a verification email will be sent shortly."
+    )
 
 
 @router.post(
