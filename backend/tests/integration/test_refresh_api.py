@@ -5,13 +5,14 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db_session
 from app.main import app
-from app.models.refresh_session import RefreshSession
+from app.models.refresh_session import RefreshSession, RefreshTokenHistory
 from app.models.user import User
+from app.security.csrf import generate_csrf_token
 from app.security.tokens import create_access_token, decode_access_token
 from app.services.refresh_sessions import (
     create_refresh_session,
@@ -31,7 +32,7 @@ def api_client(
     app.dependency_overrides[get_db_session] = override_db_session
 
     try:
-        with TestClient(app) as client:
+        with TestClient(app, headers={"Origin": "http://localhost:5173"}) as client:
             yield client
     finally:
         app.dependency_overrides.pop(get_db_session, None)
@@ -50,6 +51,27 @@ def token_settings(monkeypatch: pytest.MonkeyPatch) -> None:
             access_token_expire_minutes=15,
         ),
     )
+
+
+@pytest.fixture(autouse=True)
+def csrf_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Use a dedicated test secret for CSRF token generation and validation."""
+    from app.security import csrf
+
+    monkeypatch.setattr(
+        csrf,
+        "get_settings",
+        lambda: SimpleNamespace(
+            csrf_secret="integration-test-csrf-secret-at-least-32-characters",
+        ),
+    )
+
+
+def set_csrf(client: TestClient, session_id: uuid.UUID) -> dict[str, str]:
+    """Set the CSRF cookie and return its matching request header."""
+    token = generate_csrf_token(session_id)
+    client.cookies.set("relaysphere_csrf", token)
+    return {"X-CSRF-Token": token}
 
 
 def create_verified_user(session: Session) -> User:
@@ -80,7 +102,8 @@ def test_refresh_rotates_cookie_and_returns_access_token(
     original_expires_at = original_record.expires_at
 
     api_client.cookies.set("relaysphere_refresh", original_token)
-    response = api_client.post("/api/v1/auth/refresh")
+    csrf_headers = set_csrf(api_client, original_record.id)
+    response = api_client.post("/api/v1/auth/refresh", headers=csrf_headers)
 
     assert response.status_code == 200
     data = response.json()
@@ -129,6 +152,51 @@ def test_refresh_rejects_unknown_token_without_details(
     assert response.json() == {"detail": "Invalid or expired refresh session."}
 
 
+def test_refresh_rejects_missing_csrf_token_without_rotating_session(
+    api_client: TestClient,
+    db_session: Session,
+) -> None:
+    user = create_verified_user(db_session)
+    original_token = create_refresh_session(db_session, user.id)
+    record = db_session.scalar(select(RefreshSession).where(RefreshSession.user_id == user.id))
+    assert record is not None
+
+    db_session.commit()
+    api_client.cookies.set("relaysphere_refresh", original_token)
+    response = api_client.post("/api/v1/auth/refresh")
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "CSRF validation failed."}
+    db_session.refresh(record)
+    assert record.token_hash == hash_refresh_token(original_token)
+    assert record.revoked_at is None
+
+
+def test_refresh_rejects_mismatched_csrf_header_without_rotating_session(
+    api_client: TestClient,
+    db_session: Session,
+) -> None:
+    user = create_verified_user(db_session)
+    original_token = create_refresh_session(db_session, user.id)
+    record = db_session.scalar(select(RefreshSession).where(RefreshSession.user_id == user.id))
+    assert record is not None
+
+    valid_token = generate_csrf_token(record.id)
+    db_session.commit()
+    api_client.cookies.set("relaysphere_refresh", original_token)
+    api_client.cookies.set("relaysphere_csrf", valid_token)
+    response = api_client.post(
+        "/api/v1/auth/refresh",
+        headers={"X-CSRF-Token": "different-token"},
+    )
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "CSRF validation failed."}
+    db_session.refresh(record)
+    assert record.token_hash == hash_refresh_token(original_token)
+    assert record.revoked_at is None
+
+
 def test_replayed_refresh_token_revokes_session(
     api_client: TestClient,
     db_session: Session,
@@ -137,13 +205,17 @@ def test_replayed_refresh_token_revokes_session(
     user = create_verified_user(db_session)
     original_token = create_refresh_session(db_session, user.id)
 
+    record = db_session.scalar(select(RefreshSession).where(RefreshSession.user_id == user.id))
+    assert record is not None
+    csrf_headers = set_csrf(api_client, record.id)
     api_client.cookies.set("relaysphere_refresh", original_token)
-    first_response = api_client.post("/api/v1/auth/refresh")
+    first_response = api_client.post("/api/v1/auth/refresh", headers=csrf_headers)
     assert first_response.status_code == 200
 
     # Restore the consumed token to simulate a replay from a stolen copy.
     api_client.cookies.set("relaysphere_refresh", original_token)
-    replay_response = api_client.post("/api/v1/auth/refresh")
+    api_client.cookies.set("relaysphere_csrf", csrf_headers["X-CSRF-Token"])
+    replay_response = api_client.post("/api/v1/auth/refresh", headers=csrf_headers)
 
     assert replay_response.status_code == 401
     assert replay_response.json() == {"detail": "Invalid or expired refresh session."}
@@ -153,15 +225,95 @@ def test_replayed_refresh_token_revokes_session(
     assert record.revoked_at is not None
 
 
+def test_logout_with_consumed_refresh_token_revokes_session(
+    api_client: TestClient,
+    db_session: Session,
+    token_settings: None,
+) -> None:
+    """A consumed token with valid CSRF proof triggers replay revocation."""
+    user = create_verified_user(db_session)
+    original_token = create_refresh_session(db_session, user.id)
+    record = db_session.scalar(select(RefreshSession).where(RefreshSession.user_id == user.id))
+    assert record is not None
+
+    csrf_headers = set_csrf(api_client, record.id)
+    api_client.cookies.set("relaysphere_refresh", original_token)
+
+    refresh_response = api_client.post("/api/v1/auth/refresh", headers=csrf_headers)
+    assert refresh_response.status_code == 200
+
+    # Restore the consumed token while retaining valid proof for its session.
+    api_client.cookies.set("relaysphere_refresh", original_token)
+    api_client.cookies.set("relaysphere_csrf", csrf_headers["X-CSRF-Token"])
+    logout_response = api_client.post("/api/v1/auth/logout", headers=csrf_headers)
+
+    assert logout_response.status_code == 200
+    assert logout_response.json() == {"message": "Logged out."}
+
+    db_session.refresh(record)
+    assert record.revoked_at is not None
+
+
+def test_logout_with_consumed_refresh_token_requires_csrf(
+    api_client: TestClient,
+    db_session: Session,
+    token_settings: None,
+) -> None:
+    """A consumed token without CSRF proof must not trigger replay revocation."""
+    user = create_verified_user(db_session)
+    original_token = create_refresh_session(db_session, user.id)
+    record = db_session.scalar(select(RefreshSession).where(RefreshSession.user_id == user.id))
+    assert record is not None
+
+    csrf_headers = set_csrf(api_client, record.id)
+    api_client.cookies.set("relaysphere_refresh", original_token)
+
+    refresh_response = api_client.post("/api/v1/auth/refresh", headers=csrf_headers)
+    assert refresh_response.status_code == 200
+
+    # Restore the consumed token but remove the CSRF cookie and header.
+    api_client.cookies.set("relaysphere_refresh", original_token)
+    api_client.cookies.delete("relaysphere_csrf")
+    logout_response = api_client.post("/api/v1/auth/logout")
+
+    assert logout_response.status_code == 403
+    assert logout_response.json() == {"detail": "CSRF validation failed."}
+
+    db_session.refresh(record)
+    assert record.revoked_at is None
+
+
+def test_logout_rejects_missing_csrf_token_without_revoking_session(
+    api_client: TestClient,
+    db_session: Session,
+) -> None:
+    user = create_verified_user(db_session)
+    refresh_token = create_refresh_session(db_session, user.id)
+    record = db_session.scalar(select(RefreshSession).where(RefreshSession.user_id == user.id))
+    assert record is not None
+
+    db_session.commit()
+    api_client.cookies.set("relaysphere_refresh", refresh_token)
+    response = api_client.post("/api/v1/auth/logout")
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "CSRF validation failed."}
+    db_session.refresh(record)
+    assert record.revoked_at is None
+
+
 def test_logout_revokes_current_refresh_session(
     api_client: TestClient,
     db_session: Session,
 ) -> None:
     user = create_verified_user(db_session)
     original_token = create_refresh_session(db_session, user.id)
+    record = db_session.scalar(select(RefreshSession).where(RefreshSession.user_id == user.id))
+    assert record is not None
 
     api_client.cookies.set("relaysphere_refresh", original_token)
-    response = api_client.post("/api/v1/auth/logout")
+    csrf_headers = set_csrf(api_client, record.id)
+    response = api_client.post("/api/v1/auth/logout", headers=csrf_headers)
 
     assert response.status_code == 200
     assert response.json() == {"message": "Logged out."}
@@ -170,11 +322,86 @@ def test_logout_revokes_current_refresh_session(
     assert record is not None
     assert record.revoked_at is not None
 
-    cookie = response.headers.get("set-cookie", "").lower()
-    assert "relaysphere_refresh=" in cookie
-    assert "max-age=0" in cookie
-    assert "path=/api/v1/auth" in cookie
-    assert "httponly" in cookie
+    set_cookie_headers = response.headers.get_list("set-cookie")
+    refresh_cookie = next(
+        cookie for cookie in set_cookie_headers if cookie.startswith("relaysphere_refresh=")
+    )
+    csrf_cookie = next(
+        cookie for cookie in set_cookie_headers if cookie.startswith("relaysphere_csrf=")
+    )
+
+    refresh_cookie_lower = refresh_cookie.lower()
+    csrf_cookie_lower = csrf_cookie.lower()
+
+    assert "max-age=0" in refresh_cookie_lower
+    assert "max-age=0" in csrf_cookie_lower
+    assert "path=/api/v1/auth" in refresh_cookie_lower
+    assert "path=/api/v1/auth" in csrf_cookie_lower
+    assert "httponly" in refresh_cookie_lower
+    assert "httponly" not in csrf_cookie_lower
+    assert "samesite=lax" in refresh_cookie_lower
+    assert "samesite=lax" in csrf_cookie_lower
+    assert "secure" not in refresh_cookie_lower
+    assert "secure" not in csrf_cookie_lower
+
+
+def test_repeated_logout_is_idempotent(
+    api_client: TestClient,
+    db_session: Session,
+) -> None:
+    """Repeated logout requests succeed without creating extra token history."""
+    user = create_verified_user(db_session)
+    refresh_token = create_refresh_session(db_session, user.id)
+    record = db_session.scalar(select(RefreshSession).where(RefreshSession.user_id == user.id))
+    assert record is not None
+
+    api_client.cookies.set("relaysphere_refresh", refresh_token)
+    csrf_headers = set_csrf(api_client, record.id)
+    original_csrf_token = api_client.cookies.get("relaysphere_csrf")
+    assert original_csrf_token is not None
+
+    first_response = api_client.post(
+        "/api/v1/auth/logout",
+        headers=csrf_headers,
+    )
+
+    assert first_response.status_code == 200
+    assert first_response.json() == {"message": "Logged out."}
+
+    db_session.refresh(record)
+    assert record.revoked_at is not None
+
+    history_count_after_first_logout = db_session.scalar(
+        select(func.count())
+        .select_from(RefreshTokenHistory)
+        .where(RefreshTokenHistory.session_id == record.id)
+    )
+
+    # Restore the same credentials to simulate a repeated request.
+    api_client.cookies.set("relaysphere_refresh", refresh_token)
+    api_client.cookies.set(
+        "relaysphere_csrf",
+        original_csrf_token,
+    )
+
+    second_response = api_client.post(
+        "/api/v1/auth/logout",
+        headers=csrf_headers,
+    )
+
+    assert second_response.status_code == 200
+    assert second_response.json() == {"message": "Logged out."}
+
+    db_session.refresh(record)
+    assert record.revoked_at is not None
+
+    history_count_after_second_logout = db_session.scalar(
+        select(func.count())
+        .select_from(RefreshTokenHistory)
+        .where(RefreshTokenHistory.session_id == record.id)
+    )
+
+    assert history_count_after_second_logout == history_count_after_first_logout
 
 
 def test_logout_succeeds_without_refresh_cookie(
@@ -229,7 +456,8 @@ def test_logout_invalidates_access_token_immediately(
     assert before_logout.status_code == 200
 
     api_client.cookies.set("relaysphere_refresh", refresh_token)
-    logout_response = api_client.post("/api/v1/auth/logout")
+    csrf_headers = set_csrf(api_client, record.id)
+    logout_response = api_client.post("/api/v1/auth/logout", headers=csrf_headers)
     assert logout_response.status_code == 200
 
     after_logout = api_client.get("/api/v1/auth/me", headers=headers)
@@ -267,7 +495,8 @@ def test_logout_does_not_revoke_another_device_session(
     )
 
     api_client.cookies.set("relaysphere_refresh", first_refresh_token)
-    logout_response = api_client.post("/api/v1/auth/logout")
+    csrf_headers = set_csrf(api_client, first_record.id)
+    logout_response = api_client.post("/api/v1/auth/logout", headers=csrf_headers)
     assert logout_response.status_code == 200
 
     db_session.refresh(first_record)

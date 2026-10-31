@@ -27,7 +27,7 @@ def api_client(
     app.dependency_overrides[get_db_session] = override_db_session
 
     try:
-        with TestClient(app) as client:
+        with TestClient(app, headers={"Origin": "http://localhost:5173"}) as client:
             yield client
     finally:
         app.dependency_overrides.pop(get_db_session, None)
@@ -62,7 +62,7 @@ def test_login_returns_access_token_for_valid_credentials(
     db_session: Session,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.security import tokens
+    from app.security import csrf, tokens
 
     monkeypatch.setattr(
         tokens,
@@ -70,6 +70,14 @@ def test_login_returns_access_token_for_valid_credentials(
         lambda: SimpleNamespace(
             access_token_secret="integration-test-secret-at-least-32-characters",
             access_token_expire_minutes=15,
+        ),
+    )
+
+    monkeypatch.setattr(
+        csrf,
+        "get_settings",
+        lambda: SimpleNamespace(
+            csrf_secret="integration-test-csrf-secret-at-least-32-characters",
         ),
     )
 
@@ -85,12 +93,27 @@ def test_login_returns_access_token_for_valid_credentials(
 
     assert response.status_code == 200
 
-    cookie = response.headers.get("set-cookie", "")
-    assert "relaysphere_refresh=" in cookie
-    assert "httponly" in cookie.lower()
-    assert "samesite=lax" in cookie.lower()
-    assert "path=/api/v1/auth" in cookie.lower()
-    max_age = int(cookie.lower().split("max-age=", 1)[1].split(";", 1)[0])
+    set_cookie_headers = response.headers.get_list("set-cookie")
+    refresh_cookie = next(
+        cookie for cookie in set_cookie_headers if cookie.startswith("relaysphere_refresh=")
+    )
+    csrf_cookie_header = next(
+        cookie for cookie in set_cookie_headers if cookie.startswith("relaysphere_csrf=")
+    )
+
+    refresh_cookie_lower = refresh_cookie.lower()
+    csrf_cookie_lower = csrf_cookie_header.lower()
+
+    assert "httponly" in refresh_cookie_lower
+    assert "httponly" not in csrf_cookie_lower
+    assert "samesite=lax" in refresh_cookie_lower
+    assert "samesite=lax" in csrf_cookie_lower
+    assert "path=/api/v1/auth" in refresh_cookie_lower
+    assert "path=/api/v1/auth" in csrf_cookie_lower
+    assert "secure" not in refresh_cookie_lower
+    assert "secure" not in csrf_cookie_lower
+
+    max_age = int(refresh_cookie_lower.split("max-age=", 1)[1].split(";", 1)[0])
     refresh_record = db_session.scalar(
         select(RefreshSession).where(RefreshSession.user_id == user.id)
     )
@@ -100,7 +123,10 @@ def test_login_returns_access_token_for_valid_credentials(
         expires_at = expires_at.replace(tzinfo=UTC)
     remaining_seconds = int((expires_at - datetime.now(UTC)).total_seconds())
     assert 0 < max_age <= remaining_seconds
-    assert "secure" not in cookie.lower()
+
+    csrf_cookie = response.cookies.get("relaysphere_csrf")
+    assert isinstance(csrf_cookie, str)
+    assert csrf_cookie.startswith("v1.")
 
     data = response.json()
     assert data["token_type"] == "bearer"

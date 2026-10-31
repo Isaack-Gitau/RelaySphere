@@ -1,14 +1,25 @@
+import hmac
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
+from fastapi import (
+    APIRouter,
+    Cookie,
+    Depends,
+    Header,
+    HTTPException,
+    Request,
+    Response,
+    status,
+)
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.api.v1.dependencies.current_user import get_current_user
 from app.core.config import get_settings
 from app.db.session import get_db_session
 from app.integrations.email_delivery import send_verification_email
-from app.models.refresh_session import RefreshSession
+from app.models.refresh_session import RefreshSession, RefreshTokenHistory
 from app.models.user import User
 from app.schemas.auth import (
     CurrentUserResponse,
@@ -21,6 +32,7 @@ from app.schemas.auth import (
     VerifyEmailRequest,
     VerifyEmailResponse,
 )
+from app.security.csrf import generate_csrf_token, validate_csrf_token
 from app.security.tokens import create_access_token
 from app.services.email_verification import (
     EmailVerificationError,
@@ -31,6 +43,10 @@ from app.services.login import (
     InvalidCredentialsError,
     authenticate_user,
     get_access_token_expiry_seconds,
+)
+from app.services.rate_limiting import (
+    RateLimitBucket,
+    consume_rate_limit_buckets,
 )
 from app.services.refresh_sessions import (
     InvalidRefreshTokenError,
@@ -48,6 +64,42 @@ from app.services.registration import (
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
 
+def _enforce_rate_limit(
+    http_request: Request,
+    buckets: list[RateLimitBucket],
+) -> None:
+    """Enforce rate limits using the direct ASGI client address."""
+    client = http_request.client
+
+    if client is None or not client.host:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Service temporarily unavailable.",
+        )
+
+    try:
+        result = consume_rate_limit_buckets(buckets)
+    except SQLAlchemyError as exc:
+        # Authentication must fail closed if the persistent limiter is unavailable.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Service temporarily unavailable.",
+        ) from exc
+
+    if not result.allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many requests. Please try again later.",
+            headers={"Retry-After": str(result.retry_after_seconds or 1)},
+        )
+
+
+def _auth_cookie_path() -> str:
+    """Return the cookie path for the configured authentication API prefix."""
+    api_prefix = get_settings().api_v1_prefix.rstrip("/")
+    return f"{api_prefix}/auth"
+
+
 def _refresh_cookie_max_age(expires_at: datetime) -> int:
     """Return the remaining lifetime of a persisted refresh session."""
     if expires_at.tzinfo is None:
@@ -59,16 +111,86 @@ def _refresh_cookie_max_age(expires_at: datetime) -> int:
     return max(0, int(remaining_seconds))
 
 
+def _set_csrf_cookie(response: Response, csrf_token: str, expires_at: datetime) -> None:
+    settings = get_settings()
+    response.set_cookie(
+        key="relaysphere_csrf",
+        value=csrf_token,
+        max_age=_refresh_cookie_max_age(expires_at),
+        httponly=False,
+        secure=settings.environment.lower() not in {"development", "testing"},
+        samesite="lax",
+        path=_auth_cookie_path(),
+    )
+
+
+def _clear_auth_cookies(response: Response) -> None:
+    settings = get_settings()
+    secure = settings.environment.lower() not in {"development", "testing"}
+    response.delete_cookie(
+        key="relaysphere_refresh",
+        path=_auth_cookie_path(),
+        httponly=True,
+        secure=secure,
+        samesite="lax",
+    )
+    response.delete_cookie(
+        key="relaysphere_csrf",
+        path=_auth_cookie_path(),
+        httponly=False,
+        secure=secure,
+        samesite="lax",
+    )
+
+
+def _require_csrf(
+    csrf_cookie: str | None,
+    csrf_header: str | None,
+    session_id: object,
+) -> None:
+    if (
+        not csrf_cookie
+        or not csrf_header
+        or not hmac.compare_digest(csrf_cookie, csrf_header)
+        or not validate_csrf_token(csrf_cookie, session_id)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="CSRF validation failed.",
+        )
+
+
 @router.post(
     "/register",
     response_model=RegisterResponse,
-    status_code=status.HTTP_201_CREATED,
+    status_code=status.HTTP_202_ACCEPTED,
 )
 def register(
     registration: RegisterRequest,
+    http_request: Request,
     session: Session = Depends(get_db_session),  # noqa: B008
 ) -> RegisterResponse:
-    """Register an account and deliver its email verification token."""
+    """Register an account without revealing whether its email already exists."""
+    client = http_request.client
+    if client is None or not client.host:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Service temporarily unavailable.",
+        )
+
+    _enforce_rate_limit(
+        http_request,
+        [
+            RateLimitBucket(
+                scope="auth:register:ip",
+                kind="ip",
+                identifier=client.host,
+                limit=5,
+                window_seconds=3600,
+            ),
+        ],
+    )
+
     settings = get_settings()
 
     if settings.environment.lower() not in {"development", "testing"}:
@@ -82,14 +204,21 @@ def register(
             session,
             registration,
         )
-    except EmailAlreadyRegisteredError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Unable to register with the supplied email address.",
-        ) from exc
+    except EmailAlreadyRegisteredError:
+        return RegisterResponse(
+            message=(
+                "If an account can be created with this email, "
+                "a verification email will be sent shortly."
+            )
+        )
 
     send_verification_email(user.email, raw_token)
-    return RegisterResponse.model_validate(user)
+    return RegisterResponse(
+        message=(
+            "If an account can be created with this email, "
+            "a verification email will be sent shortly."
+        )
+    )
 
 
 @router.post(
@@ -99,9 +228,38 @@ def register(
 )
 def resend_verification(
     request: ResendVerificationRequest,
+    http_request: Request,
     session: Session = Depends(get_db_session),  # noqa: B008
 ) -> ResendVerificationResponse:
     """Resend verification email without revealing account status."""
+    client = http_request.client
+    if client is None or not client.host:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Service temporarily unavailable.",
+        )
+
+    normalized_email = str(request.email).strip().casefold()
+    _enforce_rate_limit(
+        http_request,
+        [
+            RateLimitBucket(
+                scope="auth:resend-verification:ip",
+                kind="ip",
+                identifier=client.host,
+                limit=5,
+                window_seconds=3600,
+            ),
+            RateLimitBucket(
+                scope="auth:resend-verification:ip-email",
+                kind="email",
+                identifier=f"{client.host}\\0{normalized_email}",
+                limit=3,
+                window_seconds=3600,
+            ),
+        ],
+    )
+
     settings = get_settings()
 
     if settings.environment.lower() not in {"development", "testing"}:
@@ -133,9 +291,38 @@ def resend_verification(
 def login(
     request: LoginRequest,
     response: Response,
+    http_request: Request,
     session: Session = Depends(get_db_session),  # noqa: B008
 ) -> LoginResponse:
     """Authenticate an account and issue access and refresh credentials."""
+    client = http_request.client
+    if client is None or not client.host:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Service temporarily unavailable.",
+        )
+
+    normalized_email = str(request.email).strip().casefold()
+    _enforce_rate_limit(
+        http_request,
+        [
+            RateLimitBucket(
+                scope="auth:login:ip",
+                kind="ip",
+                identifier=client.host,
+                limit=20,
+                window_seconds=900,
+            ),
+            RateLimitBucket(
+                scope="auth:login:ip-email",
+                kind="email",
+                identifier=f"{client.host}\\0{normalized_email}",
+                limit=5,
+                window_seconds=900,
+            ),
+        ],
+    )
+
     try:
         user = authenticate_user(session, request)
         refresh_token = create_refresh_session(session, user.id)
@@ -151,6 +338,7 @@ def login(
             subject=str(user.id),
             session_id=str(refresh_record.id),
         )
+        csrf_token = generate_csrf_token(refresh_record.id)
         session.commit()
     except InvalidCredentialsError as exc:
         session.rollback()
@@ -171,8 +359,9 @@ def login(
         httponly=True,
         secure=settings.environment.lower() not in {"development", "testing"},
         samesite="lax",
-        path="/api/v1/auth",
+        path=_auth_cookie_path(),
     )
+    _set_csrf_cookie(response, csrf_token, session_expires_at)
 
     return LoginResponse(
         access_token=access_token,
@@ -189,19 +378,15 @@ def login(
 def refresh_access_token(
     response: Response,
     relaysphere_refresh: str | None = Cookie(default=None),
+    relaysphere_csrf: str | None = Cookie(default=None),
+    csrf_header: str | None = Header(default=None, alias="X-CSRF-Token"),
     session: Session = Depends(get_db_session),  # noqa: B008
 ) -> LoginResponse:
     """Rotate the refresh cookie and issue a new access token."""
     settings = get_settings()
 
     def clear_refresh_cookie() -> None:
-        response.delete_cookie(
-            key="relaysphere_refresh",
-            path="/api/v1/auth",
-            httponly=True,
-            secure=settings.environment.lower() not in {"development", "testing"},
-            samesite="lax",
-        )
+        _clear_auth_cookies(response)
 
     if not relaysphere_refresh:
         clear_refresh_cookie()
@@ -215,13 +400,27 @@ def refresh_access_token(
         refresh_record = session.scalar(
             select(RefreshSession).where(RefreshSession.token_hash == current_hash)
         )
+        if refresh_record is not None:
+            session_id = refresh_record.id
+        else:
+            consumed_record = session.scalar(
+                select(RefreshTokenHistory).where(RefreshTokenHistory.token_hash == current_hash)
+            )
+            if consumed_record is None:
+                # Unknown tokens remain generic and cannot identify a session.
+                rotate_refresh_token(session, relaysphere_refresh)
+                raise InvalidRefreshTokenError("Invalid refresh token.")
+            session_id = consumed_record.session_id
+
+        # Validate before rotation so a failed CSRF check cannot revoke a session.
+        _require_csrf(relaysphere_csrf, csrf_header, session_id)
+
         if refresh_record is None:
-            # Let the service distinguish a replayed token from an unknown token.
-            # Replays must reach the session-revocation path.
+            # A valid CSRF token allows the service to detect and revoke replay.
             rotate_refresh_token(session, relaysphere_refresh)
             raise InvalidRefreshTokenError("Invalid refresh token.")
+
         user_id = refresh_record.user_id
-        session_id = refresh_record.id
         session_expires_at = refresh_record.expires_at
 
         new_refresh_token = rotate_refresh_token(
@@ -233,6 +432,7 @@ def refresh_access_token(
             subject=str(user_id),
             session_id=str(session_id),
         )
+        csrf_token = generate_csrf_token(session_id)
         session.commit()
     except RefreshTokenError as exc:
         try:
@@ -260,8 +460,9 @@ def refresh_access_token(
         httponly=True,
         secure=settings.environment.lower() not in {"development", "testing"},
         samesite="lax",
-        path="/api/v1/auth",
+        path=_auth_cookie_path(),
     )
+    _set_csrf_cookie(response, csrf_token, session_expires_at)
 
     return LoginResponse(
         access_token=new_access_token,
@@ -277,31 +478,55 @@ def refresh_access_token(
 def logout(
     response: Response,
     relaysphere_refresh: str | None = Cookie(default=None),
+    relaysphere_csrf: str | None = Cookie(default=None),
+    csrf_header: str | None = Header(default=None, alias="X-CSRF-Token"),
     session: Session = Depends(get_db_session),  # noqa: B008
 ) -> dict[str, str]:
     """Revoke the current refresh session and clear its browser cookie."""
-    settings = get_settings()
-
     try:
         if relaysphere_refresh:
-            try:
+            current_hash = hash_refresh_token(relaysphere_refresh)
+            refresh_record = session.scalar(
+                select(RefreshSession).where(RefreshSession.token_hash == current_hash)
+            )
+
+            if refresh_record is not None:
+                # Active tokens require proof of possession before revocation.
+                _require_csrf(relaysphere_csrf, csrf_header, refresh_record.id)
                 revoke_refresh_session(session, relaysphere_refresh)
-            except InvalidRefreshTokenError:
-                # Invalid cookies must not reveal whether a session exists.
-                session.rollback()
+            else:
+                consumed_record = session.scalar(
+                    select(RefreshTokenHistory).where(
+                        RefreshTokenHistory.token_hash == current_hash
+                    )
+                )
+
+                if consumed_record is not None:
+                    # A consumed token can identify its session only after CSRF validation.
+                    _require_csrf(
+                        relaysphere_csrf,
+                        csrf_header,
+                        consumed_record.session_id,
+                    )
+
+                    try:
+                        # Reuse detection revokes the associated session.
+                        rotate_refresh_token(session, relaysphere_refresh)
+                    except RefreshTokenError as exc:
+                        if exc.commit_required:
+                            session.commit()
+                        else:
+                            session.rollback()
+                else:
+                    # Unknown tokens cannot identify a session and remain generic.
+                    session.rollback()
 
         session.commit()
     except Exception:
         session.rollback()
         raise
 
-    response.delete_cookie(
-        key="relaysphere_refresh",
-        path="/api/v1/auth",
-        httponly=True,
-        secure=settings.environment.lower() not in {"development", "testing"},
-        samesite="lax",
-    )
+    _clear_auth_cookies(response)
 
     return {"message": "Logged out."}
 
@@ -325,9 +550,30 @@ def get_me(
 )
 def verify_email(
     request: VerifyEmailRequest,
+    http_request: Request,
     session: Session = Depends(get_db_session),  # noqa: B008
 ) -> VerifyEmailResponse:
     """Verify an email address using a valid verification token."""
+    client = http_request.client
+    if client is None or not client.host:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Service temporarily unavailable.",
+        )
+
+    _enforce_rate_limit(
+        http_request,
+        [
+            RateLimitBucket(
+                scope="auth:verify-email:ip",
+                kind="ip",
+                identifier=client.host,
+                limit=10,
+                window_seconds=900,
+            ),
+        ],
+    )
+
     try:
         user = verify_email_token(session, request.token)
         session.commit()

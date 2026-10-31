@@ -32,7 +32,7 @@ def api_client(
     app.dependency_overrides[get_db_session] = override_db_session
 
     try:
-        with TestClient(app) as client:
+        with TestClient(app, headers={"Origin": "http://localhost:5173"}) as client:
             yield client
     finally:
         app.dependency_overrides.pop(get_db_session, None)

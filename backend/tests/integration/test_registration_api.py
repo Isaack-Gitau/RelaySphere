@@ -30,13 +30,13 @@ def api_client(
     app.dependency_overrides[get_db_session] = override_db_session
 
     try:
-        with TestClient(app) as client:
+        with TestClient(app, headers={"Origin": "http://localhost:5173"}) as client:
             yield client
     finally:
         app.dependency_overrides.pop(get_db_session, None)
 
 
-def test_register_endpoint_returns_safe_account_response(
+def test_register_endpoint_returns_generic_response(
     api_client: TestClient,
 ) -> None:
     response = api_client.post(
@@ -48,17 +48,13 @@ def test_register_endpoint_returns_safe_account_response(
         },
     )
 
-    assert response.status_code == 201
-
-    data = response.json()
-    assert data["email"] == "httpuser@example.com"
-    assert data["display_name"] == "HTTP User"
-    assert data["is_active"] is True
-    assert data["email_verified_at"] is None
-    assert "id" in data
-    assert "created_at" in data
-    assert "password" not in data
-    assert "password_hash" not in data
+    assert response.status_code == 202
+    assert response.json() == {
+        "message": (
+            "If an account can be created with this email, "
+            "a verification email will be sent shortly."
+        )
+    }
 
 
 def test_register_delivers_token_without_exposing_it_in_response(
@@ -85,7 +81,13 @@ def test_register_delivers_token_without_exposing_it_in_response(
         },
     )
 
-    assert response.status_code == 201
+    assert response.status_code == 202
+    assert response.json() == {
+        "message": (
+            "If an account can be created with this email, "
+            "a verification email will be sent shortly."
+        )
+    }
     assert delivered["recipient_email"] == "delivery@example.com"
     assert delivered["raw_token"]
     assert delivered["raw_token"] not in response.text
@@ -138,11 +140,17 @@ def test_register_endpoint_rejects_duplicate_email(
         json=payload,
     )
 
-    assert first_response.status_code == 201
-    assert second_response.status_code == 409
-    assert second_response.json() == {
-        "detail": "Unable to register with the supplied email address."
+    expected_response = {
+        "message": (
+            "If an account can be created with this email, "
+            "a verification email will be sent shortly."
+        )
     }
+
+    assert first_response.status_code == 202
+    assert second_response.status_code == 202
+    assert first_response.json() == expected_response
+    assert second_response.json() == expected_response
 
 
 def test_register_endpoint_rejects_email_case_variation(
@@ -165,9 +173,9 @@ def test_register_endpoint_rejects_email_case_variation(
         },
     )
 
-    assert first_response.status_code == 201
-    assert first_response.json()["email"] == "caseuser@example.com"
-    assert second_response.status_code == 409
+    assert first_response.status_code == 202
+    assert second_response.status_code == 202
+    assert first_response.json() == second_response.json()
 
 
 def test_register_endpoint_stores_a_password_hash(
@@ -185,7 +193,7 @@ def test_register_endpoint_stores_a_password_hash(
         },
     )
 
-    assert response.status_code == 201
+    assert response.status_code == 202
 
     user = db_session.scalar(select(User).where(User.email == "hashedpassword@example.com"))
 

@@ -21,6 +21,9 @@ def isolated_settings(
         "API_V1_PREFIX",
         "DATABASE_URL",
         "ACCESS_TOKEN_SECRET",
+        "CSRF_SECRET",
+        "RATE_LIMIT_SECRET",
+        "CORS_ALLOWED_ORIGINS",
         "ACCESS_TOKEN_EXPIRE_MINUTES",
         "SESSION_IDLE_TIMEOUT_MINUTES",
         "SESSION_ABSOLUTE_LIFETIME_DAYS",
@@ -39,6 +42,9 @@ def test_settings_use_expected_defaults(
     assert settings.api_v1_prefix == "/api/v1"
     assert settings.database_url == ""
     assert settings.access_token_secret == ""
+    assert settings.csrf_secret == ""
+    assert settings.rate_limit_secret == ""
+    assert settings.cors_allowed_origins == "http://localhost:5173"
     assert settings.access_token_expire_minutes == 15
     assert settings.session_idle_timeout_minutes == 30
     assert settings.session_absolute_lifetime_days == 7
@@ -51,6 +57,9 @@ def test_settings_read_environment_variables(
     monkeypatch.setenv("APP_NAME", "RelaySphere Test")
     monkeypatch.setenv("ENVIRONMENT", "testing")
     monkeypatch.setenv("ACCESS_TOKEN_SECRET", "test-secret-not-for-real-use")
+    monkeypatch.setenv("CSRF_SECRET", "test-csrf-secret-at-least-32-characters")
+    monkeypatch.setenv("RATE_LIMIT_SECRET", "test-rate-limit-secret-at-least-32-characters")
+    monkeypatch.setenv("CORS_ALLOWED_ORIGINS", "http://localhost:5173,https://example.test")
     monkeypatch.setenv("ACCESS_TOKEN_EXPIRE_MINUTES", "20")
     monkeypatch.setenv("SESSION_IDLE_TIMEOUT_MINUTES", "45")
     monkeypatch.setenv("SESSION_ABSOLUTE_LIFETIME_DAYS", "14")
@@ -60,6 +69,9 @@ def test_settings_read_environment_variables(
     assert settings.app_name == "RelaySphere Test"
     assert settings.environment == "testing"
     assert settings.access_token_secret == "test-secret-not-for-real-use"
+    assert settings.csrf_secret == "test-csrf-secret-at-least-32-characters"
+    assert settings.rate_limit_secret == "test-rate-limit-secret-at-least-32-characters"
+    assert settings.cors_allowed_origins == "http://localhost:5173,https://example.test"
     assert settings.access_token_expire_minutes == 20
     assert settings.session_idle_timeout_minutes == 45
     assert settings.session_absolute_lifetime_days == 14

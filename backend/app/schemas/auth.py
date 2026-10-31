@@ -28,16 +28,9 @@ class RegisterRequest(BaseModel):
 
 
 class RegisterResponse(BaseModel):
-    """Expose safe account fields after registration."""
+    """Return a generic response without revealing account existence."""
 
-    model_config = ConfigDict(from_attributes=True)
-
-    id: uuid.UUID
-    email: EmailStr
-    display_name: str
-    is_active: bool
-    email_verified_at: datetime | None
-    created_at: datetime
+    message: str
 
 
 class CurrentUserResponse(BaseModel):

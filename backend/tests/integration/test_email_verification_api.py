@@ -25,7 +25,7 @@ def api_client(db_session: Session) -> Generator[TestClient]:
     app.dependency_overrides[get_db_session] = override_db_session
 
     try:
-        with TestClient(app) as client:
+        with TestClient(app, headers={"Origin": "http://localhost:5173"}) as client:
             yield client
     finally:
         app.dependency_overrides.pop(get_db_session, None)
@@ -187,8 +187,8 @@ def test_resend_verification_creates_replacement_token(
     )
     assert old_record is not None
 
-    # simulate a token created more than 120 seconds ago.
-    old_record.created_at = datetime.now(UTC) - timedelta(minutes=3)
+    # Simulate a token created just beyond the 60-second cooldown.
+    old_record.created_at = datetime.now(UTC) - timedelta(seconds=61)
     db_session.flush()
 
     sent_emails: list[tuple[str, str]] = []

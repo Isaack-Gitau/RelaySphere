@@ -9,8 +9,8 @@ from sqlalchemy.orm import Session
 from app.models.email_verification_token import EmailVerificationToken
 from app.models.user import User
 
-TOKEN_EXPIRY_MINUTES = 30
-RESEND_COOLDOWN_SECONDS = 120
+TOKEN_EXPIRY_MINUTES = 24 * 60
+RESEND_COOLDOWN_SECONDS = 60
 
 
 class EmailVerificationError(Exception):

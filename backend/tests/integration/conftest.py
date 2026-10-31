@@ -1,11 +1,12 @@
 from collections.abc import Generator
 
 import pytest
-from sqlalchemy import Engine, create_engine, text
+from sqlalchemy import Engine, create_engine, delete, text
 from sqlalchemy.engine import make_url
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import get_settings
+from app.models.rate_limit_counter import RateLimitCounter
 
 
 @pytest.fixture(scope="session")
@@ -40,6 +41,28 @@ def integration_test_engine() -> Generator[Engine]:
         yield engine
     finally:
         engine.dispose()
+
+
+@pytest.fixture(autouse=True)
+def isolate_rate_limit_counters(
+    integration_test_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep independent rate-limit transactions inside the test database."""
+    factory = sessionmaker(
+        bind=integration_test_engine,
+        class_=Session,
+        autoflush=False,
+        expire_on_commit=False,
+    )
+
+    monkeypatch.setattr(
+        "app.services.rate_limiting.get_session_factory",
+        lambda: factory,
+    )
+
+    with factory.begin() as session:
+        session.execute(delete(RateLimitCounter))
 
 
 @pytest.fixture

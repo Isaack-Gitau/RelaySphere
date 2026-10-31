@@ -10,13 +10,16 @@ _ALGORITHM = "HS256"
 _MIN_SECRET_LENGTH = 32
 
 
+def validate_access_token_secret(secret: str | None) -> None:
+    """Reject missing, blank, or insufficient access-token signing secrets."""
+    if not isinstance(secret, str) or len(secret) < _MIN_SECRET_LENGTH or not secret.strip():
+        raise RuntimeError("ACCESS_TOKEN_SECRET must contain at least 32 non-blank characters.")
+
+
 def _get_signing_secret() -> str:
     """Return the configured signing secret or fail closed."""
     secret = get_settings().access_token_secret
-
-    if len(secret) < _MIN_SECRET_LENGTH:
-        raise RuntimeError("ACCESS_TOKEN_SECRET must contain at least 32 characters.")
-
+    validate_access_token_secret(secret)
     return secret
 
 

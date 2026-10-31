@@ -5,7 +5,11 @@ import jwt
 import pytest
 
 from app.core.config import get_settings
-from app.security.tokens import create_access_token, decode_access_token
+from app.security.tokens import (
+    create_access_token,
+    decode_access_token,
+    validate_access_token_secret,
+)
 
 SESSION_ID = "11111111-1111-4111-8111-111111111111"
 
@@ -130,10 +134,31 @@ def test_decode_rejects_unexpected_signing_algorithm(
         decode_access_token(token)
 
 
+@pytest.mark.parametrize(
+    "secret",
+    [
+        None,
+        "",
+        " ",
+        "\t" * 40,
+        "too-short",
+    ],
+)
+def test_validate_access_token_secret_rejects_invalid_values(
+    secret: str | None,
+) -> None:
+    with pytest.raises(RuntimeError, match="ACCESS_TOKEN_SECRET"):
+        validate_access_token_secret(secret)
+
+
+def test_validate_access_token_secret_accepts_valid_secret() -> None:
+    validate_access_token_secret("a-valid-test-secret-with-at-least-32-characters")
+
+
 def test_create_token_rejects_missing_secret(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("ACCESS_TOKEN_SECRET", raising=False)
+    monkeypatch.setenv("ACCESS_TOKEN_SECRET", "")
     get_settings.cache_clear()
 
     try:
@@ -150,7 +175,7 @@ def test_create_token_rejects_short_secret(
     get_settings.cache_clear()
 
     try:
-        with pytest.raises(RuntimeError, match="at least 32 characters"):
+        with pytest.raises(RuntimeError, match="at least 32 non-blank characters"):
             create_access_token(subject="user-123", session_id=SESSION_ID)
     finally:
         get_settings.cache_clear()
