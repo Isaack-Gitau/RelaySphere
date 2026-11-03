@@ -22,6 +22,10 @@ def register_user(
     """Create an unverified user without committing the caller's transaction."""
     email = str(registration.email).strip().lower()
 
+    # Hash before the duplicate lookup so existing and new addresses both pay for
+    # Argon2 and response timing does not reveal which emails are registered.
+    password_hash = hash_password(registration.password)
+
     existing_user_id = session.scalar(select(User.id).where(User.email == email))
     if existing_user_id is not None:
         raise EmailAlreadyRegisteredError("An account with this email address already exists.")
@@ -29,7 +33,7 @@ def register_user(
     user = User(
         email=email,
         display_name=registration.display_name,
-        password_hash=hash_password(registration.password),
+        password_hash=password_hash,
         email_verified_at=None,
     )
 

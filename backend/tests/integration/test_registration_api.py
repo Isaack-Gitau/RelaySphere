@@ -12,6 +12,7 @@ from app.main import app
 from app.models.email_outbox import EmailOutbox
 from app.models.user import User
 from app.security.email_outbox_encryption import decrypt_email_payload
+from app.security.passwords import hash_password
 
 
 @pytest.fixture
@@ -218,3 +219,61 @@ def test_register_endpoint_rejects_invalid_password(
     )
 
     assert response.status_code == 422
+
+
+def _record_registration_hashing(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record every password hashed by the registration service."""
+    hashed: list[str] = []
+
+    def recording_hash_password(password: str) -> str:
+        hashed.append(password)
+        return hash_password(password)
+
+    monkeypatch.setattr("app.services.registration.hash_password", recording_hash_password)
+    return hashed
+
+
+def test_register_hashes_password_for_new_email(
+    api_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hashed = _record_registration_hashing(monkeypatch)
+
+    response = api_client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": "newhash@example.com",
+            "display_name": "New Hash",
+            "password": "a-strong-test-password",
+        },
+    )
+
+    assert response.status_code == 202
+    assert hashed == ["a-strong-test-password"]
+
+
+def test_register_hashes_password_for_duplicate_email(
+    api_client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A duplicate pays for Argon2 too so response timing does not reveal accounts."""
+    payload = {
+        "email": "duplicatehash@example.com",
+        "display_name": "Duplicate Hash",
+        "password": "a-strong-test-password",
+    }
+    first_response = api_client.post("/api/v1/auth/register", json=payload)
+    assert first_response.status_code == 202
+
+    hashed = _record_registration_hashing(monkeypatch)
+
+    second_response = api_client.post("/api/v1/auth/register", json=payload)
+
+    assert second_response.status_code == 202
+    assert second_response.json() == first_response.json()
+    assert hashed == [payload["password"]]
+    users = db_session.scalars(select(User).where(User.email == payload["email"])).all()
+    assert len(users) == 1
+    jobs = db_session.scalars(select(EmailOutbox)).all()
+    assert len(jobs) == 1
