@@ -38,3 +38,10 @@ def authenticate_user(session: Session, request: LoginRequest) -> User:
 def get_access_token_expiry_seconds() -> int:
     """Return the configured access-token lifetime in seconds."""
     return get_settings().access_token_expire_minutes * 60
+
+
+def verify_reauth_password(user: User, password: str) -> bool:
+    """Check a password for reauthentication, doing equal work for passwordless users."""
+    password_hash = user.password_hash or None
+    password_is_valid = verify_password(password, password_hash or _DUMMY_PASSWORD_HASH)
+    return password_hash is not None and password_is_valid

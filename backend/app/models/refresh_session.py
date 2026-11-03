@@ -53,6 +53,11 @@ class RefreshSession(Base):
         nullable=True,
     )
 
+    reauthenticated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
 
 class RefreshTokenHistory(Base):
     """Store hashes of consumed refresh tokens for replay detection."""

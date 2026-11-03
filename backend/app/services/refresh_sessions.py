@@ -70,9 +70,22 @@ def session_is_expired(refresh_session: RefreshSession, now: datetime) -> bool:
     return absolute_expiry <= now or idle_expiry <= now
 
 
+REAUTH_WINDOW = timedelta(minutes=10)
+
+
+def is_recently_reauthenticated(marker: datetime | None, now: datetime) -> bool:
+    """Return True only when the marker is set, not in the future, and under 10 minutes old."""
+    if marker is None:
+        return False
+    age = now - _as_utc(marker)
+    return timedelta(0) <= age < REAUTH_WINDOW
+
+
 def create_refresh_session(
     session: Session,
     user_id: uuid.UUID,
+    *,
+    reauthenticated: bool = False,
 ) -> str:
     """Create a refresh session and return its raw token once."""
     now = datetime.now(UTC)
@@ -82,6 +95,7 @@ def create_refresh_session(
         user_id=user_id,
         token_hash=hash_refresh_token(raw_token),
         expires_at=_expiry_from(now),
+        reauthenticated_at=now if reauthenticated else None,
     )
     session.add(refresh_session)
     session.flush()

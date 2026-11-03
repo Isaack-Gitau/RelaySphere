@@ -141,6 +141,12 @@ def test_login_returns_access_token_for_valid_credentials(
     assert "password" not in data
     assert "password_hash" not in data
 
+    reauthenticated_at = refresh_record.reauthenticated_at
+    assert reauthenticated_at is not None
+    if reauthenticated_at.tzinfo is None:
+        reauthenticated_at = reauthenticated_at.replace(tzinfo=UTC)
+    assert abs((datetime.now(UTC) - reauthenticated_at).total_seconds()) < 10
+
 
 @pytest.mark.parametrize(
     ("email", "password"),

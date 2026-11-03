@@ -15,7 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.api.v1.dependencies.current_user import get_current_user
+from app.api.v1.dependencies.current_user import get_current_auth, get_current_user
 from app.core.config import get_settings
 from app.db.session import get_db_session
 from app.models.refresh_session import RefreshSession, RefreshTokenHistory
@@ -24,6 +24,8 @@ from app.schemas.auth import (
     CurrentUserResponse,
     LoginRequest,
     LoginResponse,
+    ReauthRequest,
+    ReauthResponse,
     RegisterRequest,
     RegisterResponse,
     ResendVerificationRequest,
@@ -43,12 +45,14 @@ from app.services.login import (
     InvalidCredentialsError,
     authenticate_user,
     get_access_token_expiry_seconds,
+    verify_reauth_password,
 )
 from app.services.rate_limiting import (
     RateLimitBucket,
     consume_rate_limit_buckets,
 )
 from app.services.refresh_sessions import (
+    REAUTH_WINDOW,
     InvalidRefreshTokenError,
     RefreshTokenError,
     create_refresh_session,
@@ -313,7 +317,7 @@ def login(
 
     try:
         user = authenticate_user(session, request)
-        refresh_token = create_refresh_session(session, user.id)
+        refresh_token = create_refresh_session(session, user.id, reauthenticated=True)
         refresh_record = session.scalar(
             select(RefreshSession).where(
                 RefreshSession.token_hash == hash_refresh_token(refresh_token)
@@ -582,3 +586,76 @@ def verify_email(
         message="Email verified successfully.",
         email_verified_at=user.email_verified_at,
     )
+
+
+@router.post(
+    "/reauth",
+    response_model=ReauthResponse,
+    status_code=status.HTTP_200_OK,
+)
+def reauthenticate(
+    request: ReauthRequest,
+    http_request: Request,
+    auth: tuple[User, RefreshSession] = Depends(get_current_auth),  # noqa: B008
+    session: Session = Depends(get_db_session),  # noqa: B008
+) -> ReauthResponse:
+    """Confirm the password and start a fixed 10-minute reauthentication window."""
+    user, current_session = auth
+    client = http_request.client
+    if client is None or not client.host:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Service temporarily unavailable.",
+        )
+
+    normalized_email = user.email.strip().casefold()
+    _enforce_rate_limit(
+        http_request,
+        [
+            RateLimitBucket(
+                scope="auth:reauth:ip",
+                kind="ip",
+                identifier=client.host,
+                limit=20,
+                window_seconds=900,
+            ),
+            RateLimitBucket(
+                scope="auth:reauth:user",
+                kind="email",
+                identifier=normalized_email,
+                limit=5,
+                window_seconds=900,
+            ),
+        ],
+    )
+
+    if not verify_reauth_password(user, request.password):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="invalid_credentials",
+        )
+
+    try:
+        record = session.scalar(
+            select(RefreshSession)
+            .where(RefreshSession.id == current_session.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        now = datetime.now(UTC)
+        if record is None or record.revoked_at is not None:
+            session.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Could not validate credentials.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        record.reauthenticated_at = now
+        session.commit()
+    except HTTPException:
+        raise
+    except Exception:
+        session.rollback()
+        raise
+
+    return ReauthResponse(reauthenticated_until=now + REAUTH_WINDOW)

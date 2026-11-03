@@ -510,3 +510,51 @@ def test_logout_does_not_revoke_another_device_session(
         headers={"Authorization": f"Bearer {second_access_token}"},
     )
     assert second_device_response.status_code == 200
+
+
+def test_refresh_and_replay_never_change_reauthenticated_at(
+    api_client: TestClient,
+    db_session: Session,
+    token_settings: None,
+) -> None:
+    """Rotation and replay detection must not extend the reauthentication window."""
+    user = create_verified_user(db_session)
+    original_token = create_refresh_session(db_session, user.id, reauthenticated=True)
+    record = db_session.scalar(select(RefreshSession).where(RefreshSession.user_id == user.id))
+    assert record is not None
+    marker = record.reauthenticated_at
+    assert marker is not None
+
+    api_client.cookies.set("relaysphere_refresh", original_token)
+    csrf_headers = set_csrf(api_client, record.id)
+    first_response = api_client.post("/api/v1/auth/refresh", headers=csrf_headers)
+    assert first_response.status_code == 200
+    db_session.refresh(record)
+    assert record.reauthenticated_at == marker
+
+    api_client.cookies.set("relaysphere_refresh", original_token)
+    api_client.cookies.set("relaysphere_csrf", csrf_headers["X-CSRF-Token"])
+    replay_response = api_client.post("/api/v1/auth/refresh", headers=csrf_headers)
+    assert replay_response.status_code == 401
+    db_session.refresh(record)
+    assert record.reauthenticated_at == marker
+
+
+def test_refresh_leaves_unset_reauthenticated_at_null(
+    api_client: TestClient,
+    db_session: Session,
+    token_settings: None,
+) -> None:
+    """A session that never reauthenticated must not gain a marker through refresh."""
+    user = create_verified_user(db_session)
+    original_token = create_refresh_session(db_session, user.id)
+    record = db_session.scalar(select(RefreshSession).where(RefreshSession.user_id == user.id))
+    assert record is not None
+    assert record.reauthenticated_at is None
+
+    api_client.cookies.set("relaysphere_refresh", original_token)
+    csrf_headers = set_csrf(api_client, record.id)
+    response = api_client.post("/api/v1/auth/refresh", headers=csrf_headers)
+    assert response.status_code == 200
+    db_session.refresh(record)
+    assert record.reauthenticated_at is None

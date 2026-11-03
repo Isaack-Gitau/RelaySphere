@@ -10,7 +10,7 @@ from app.db.session import get_db_session
 from app.models.refresh_session import RefreshSession
 from app.models.user import User
 from app.security.tokens import decode_access_token
-from app.services.refresh_sessions import session_is_expired
+from app.services.refresh_sessions import is_recently_reauthenticated, session_is_expired
 
 _bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -24,13 +24,13 @@ def _authentication_error() -> HTTPException:
     )
 
 
-def get_current_user(
+def get_current_auth(
     credentials: HTTPAuthorizationCredentials | None = Depends(  # noqa: B008
         _bearer_scheme
     ),
     session: Session = Depends(get_db_session),  # noqa: B008
-) -> User:
-    """Resolve a bearer token through its active server-managed session."""
+) -> tuple[User, RefreshSession]:
+    """Resolve a bearer token to its user and active server-managed session."""
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise _authentication_error()
 
@@ -64,4 +64,24 @@ def get_current_user(
         refresh_session.last_used_at = now
         session.commit()
 
+    return user, refresh_session
+
+
+def get_current_user(
+    auth: tuple[User, RefreshSession] = Depends(get_current_auth),  # noqa: B008
+) -> User:
+    """Resolve a bearer token to its authenticated user."""
+    return auth[0]
+
+
+def require_recent_reauth(
+    auth: tuple[User, RefreshSession] = Depends(get_current_auth),  # noqa: B008
+) -> User:
+    """Require a session that re-entered its password within the last 10 minutes."""
+    user, refresh_session = auth
+    if not is_recently_reauthenticated(refresh_session.reauthenticated_at, datetime.now(UTC)):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="reauthentication_required",
+        )
     return user

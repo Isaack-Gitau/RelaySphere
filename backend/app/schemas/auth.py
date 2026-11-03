@@ -96,3 +96,15 @@ class LoginResponse(BaseModel):
     access_token: str
     token_type: Literal["bearer"] = "bearer"
     expires_in: int = Field(gt=0)
+
+
+class ReauthRequest(BaseModel):
+    """Validate a password re-entry request for the current session."""
+
+    password: str = Field(min_length=1, max_length=128)
+
+
+class ReauthResponse(BaseModel):
+    """Report when the recent-reauthentication window ends."""
+
+    reauthenticated_until: datetime
