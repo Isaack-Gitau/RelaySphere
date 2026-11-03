@@ -30,6 +30,8 @@ from app.schemas.auth import (
     RegisterResponse,
     ResendVerificationRequest,
     ResendVerificationResponse,
+    RevokeOthersRequest,
+    RevokeOthersResponse,
     VerifyEmailRequest,
     VerifyEmailResponse,
 )
@@ -57,6 +59,7 @@ from app.services.refresh_sessions import (
     RefreshTokenError,
     create_refresh_session,
     hash_refresh_token,
+    is_recently_reauthenticated,
     revoke_refresh_session,
     rotate_refresh_token,
 )
@@ -659,3 +662,85 @@ def reauthenticate(
         raise
 
     return ReauthResponse(reauthenticated_until=now + REAUTH_WINDOW)
+
+
+@router.post(
+    "/sessions/revoke-others",
+    response_model=RevokeOthersResponse,
+    status_code=status.HTTP_200_OK,
+)
+def revoke_other_sessions(
+    request: RevokeOthersRequest,
+    http_request: Request,
+    auth: tuple[User, RefreshSession] = Depends(get_current_auth),  # noqa: B008
+    session: Session = Depends(get_db_session),  # noqa: B008
+) -> RevokeOthersResponse:
+    """Revoke every other active session of the user and keep the current one."""
+    user, current_session = auth
+    client = http_request.client
+    if client is None or not client.host:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Service temporarily unavailable.",
+        )
+
+    normalized_email = user.email.strip().casefold()
+    _enforce_rate_limit(
+        http_request,
+        [
+            RateLimitBucket(
+                scope="auth:revoke-others:ip",
+                kind="ip",
+                identifier=client.host,
+                limit=20,
+                window_seconds=900,
+            ),
+            RateLimitBucket(
+                scope="auth:revoke-others:user",
+                kind="email",
+                identifier=normalized_email,
+                limit=5,
+                window_seconds=900,
+            ),
+        ],
+    )
+
+    try:
+        # Lock every active session of this user in a stable order so two
+        # concurrent revoke-others calls cannot deadlock each other.
+        active_sessions = session.scalars(
+            select(RefreshSession)
+            .where(
+                RefreshSession.user_id == user.id,
+                RefreshSession.revoked_at.is_(None),
+            )
+            .order_by(RefreshSession.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).all()
+        now = datetime.now(UTC)
+        current = next((s for s in active_sessions if s.id == current_session.id), None)
+        if current is None:
+            session.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Could not validate credentials.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        if not is_recently_reauthenticated(current.reauthenticated_at, now):
+            session.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="reauthentication_required",
+            )
+        others = [s for s in active_sessions if s.id != current.id]
+        for other in others:
+            other.revoked_at = now
+        session.commit()
+    except HTTPException:
+        raise
+    except Exception:
+        session.rollback()
+        raise
+
+    return RevokeOthersResponse(revoked_count=len(others))

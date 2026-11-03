@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, StrictBool, field_validator
 
 
 class RegisterRequest(BaseModel):
@@ -108,3 +108,25 @@ class ReauthResponse(BaseModel):
     """Report when the recent-reauthentication window ends."""
 
     reauthenticated_until: datetime
+
+
+class RevokeOthersRequest(BaseModel):
+    """Confirm that every other session of the account should be signed out."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    confirm: StrictBool
+
+    @field_validator("confirm", mode="after")
+    @classmethod
+    def require_true(cls, value: bool) -> bool:
+        """Reject anything except an explicit true."""
+        if value is not True:
+            raise ValueError("confirm must be true.")
+        return value
+
+
+class RevokeOthersResponse(BaseModel):
+    """Report how many other sessions were revoked."""
+
+    revoked_count: int = Field(ge=0)
