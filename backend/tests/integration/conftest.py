@@ -1,4 +1,7 @@
+import base64
+import json
 from collections.abc import Generator
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import Engine, create_engine, delete, text
@@ -86,3 +89,17 @@ def db_session(
         if transaction.is_active:
             transaction.rollback()
         connection.close()
+
+
+@pytest.fixture
+def configured_outbox_encryption(monkeypatch: pytest.MonkeyPatch) -> None:
+    key = bytes(range(32))
+    encoded_key = base64.b64encode(key).decode("ascii")
+
+    monkeypatch.setattr(
+        "app.security.email_outbox_encryption.get_settings",
+        lambda: SimpleNamespace(
+            email_outbox_active_key_id="integration-test",
+            email_outbox_encryption_keys=json.dumps({"integration-test": encoded_key}),
+        ),
+    )

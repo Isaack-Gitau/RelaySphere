@@ -10,13 +10,18 @@ from sqlalchemy.orm import Session
 
 from app.db.session import get_db_session
 from app.main import app
+from app.models.email_outbox import EmailOutbox
 from app.models.email_verification_token import EmailVerificationToken
 from app.models.user import User
+from app.security.email_outbox_encryption import decrypt_email_payload
 from app.services.email_verification import create_verification_token
 
 
 @pytest.fixture
-def api_client(db_session: Session) -> Generator[TestClient]:
+def api_client(
+    db_session: Session,
+    configured_outbox_encryption: None,
+) -> Generator[TestClient]:
     """Use the isolated integration-test session for HTTP requests."""
 
     def override_db_session() -> Generator[Session]:
@@ -172,10 +177,9 @@ RESEND_VERIFICATION_MESSAGE = (
 )
 
 
-def test_resend_verification_creates_replacement_token(
+def test_resend_verification_queues_encrypted_replacement_token(
     api_client: TestClient,
     db_session: Session,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     user = create_unverified_user(db_session)
     old_raw_token = create_verification_token(db_session, user.id)
@@ -191,16 +195,6 @@ def test_resend_verification_creates_replacement_token(
     old_record.created_at = datetime.now(UTC) - timedelta(seconds=61)
     db_session.flush()
 
-    sent_emails: list[tuple[str, str]] = []
-
-    def capture_email(recipient_email: str, raw_token: str) -> None:
-        sent_emails.append((recipient_email, raw_token))
-
-    monkeypatch.setattr(
-        "app.api.v1.endpoints.auth.send_verification_email",
-        capture_email,
-    )
-
     response = api_client.post(
         "/api/v1/auth/resend-verification",
         json={"email": user.email},
@@ -208,8 +202,14 @@ def test_resend_verification_creates_replacement_token(
 
     assert response.status_code == 200
     assert response.json() == {"message": RESEND_VERIFICATION_MESSAGE}
-    assert len(sent_emails) == 1
-    assert sent_emails[0][0] == user.email
+
+    job = db_session.scalar(
+        select(EmailOutbox).where(EmailOutbox.event_type == "email.verification")
+    )
+    assert job is not None
+    payload = decrypt_email_payload(job.event_type, job.encrypted_payload)
+    assert payload["recipient"] == user.email
+    raw_token = payload["verification_token"]
 
     old_record = db_session.scalar(
         select(EmailVerificationToken).where(
@@ -218,8 +218,7 @@ def test_resend_verification_creates_replacement_token(
     )
     new_record = db_session.scalar(
         select(EmailVerificationToken).where(
-            EmailVerificationToken.token_hash
-            == hashlib.sha256(sent_emails[0][1].encode()).hexdigest()
+            EmailVerificationToken.token_hash == hashlib.sha256(raw_token.encode()).hexdigest()
         )
     )
 
@@ -234,18 +233,8 @@ def test_resend_verification_creates_replacement_token(
 
 def test_resend_verification_unknown_email_returns_generic_response(
     api_client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
+    db_session: Session,
 ) -> None:
-    sent_emails: list[tuple[str, str]] = []
-
-    def capture_email(recipient_email: str, raw_token: str) -> None:
-        sent_emails.append((recipient_email, raw_token))
-
-    monkeypatch.setattr(
-        "app.api.v1.endpoints.auth.send_verification_email",
-        capture_email,
-    )
-
     response = api_client.post(
         "/api/v1/auth/resend-verification",
         json={"email": "unknown@example.com"},
@@ -253,28 +242,17 @@ def test_resend_verification_unknown_email_returns_generic_response(
 
     assert response.status_code == 200
     assert response.json() == {"message": RESEND_VERIFICATION_MESSAGE}
-    assert sent_emails == []
+    assert db_session.scalar(select(EmailOutbox.id)) is None
 
 
 def test_resend_verification_verified_account_returns_generic_response(
     api_client: TestClient,
     db_session: Session,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     user = create_unverified_user(db_session)
     user.email_verified_at = datetime.now(UTC)
     db_session.flush()
 
-    sent_emails: list[tuple[str, str]] = []
-
-    def capture_email(recipient_email: str, raw_token: str) -> None:
-        sent_emails.append((recipient_email, raw_token))
-
-    monkeypatch.setattr(
-        "app.api.v1.endpoints.auth.send_verification_email",
-        capture_email,
-    )
-
     response = api_client.post(
         "/api/v1/auth/resend-verification",
         json={"email": user.email},
@@ -282,26 +260,15 @@ def test_resend_verification_verified_account_returns_generic_response(
 
     assert response.status_code == 200
     assert response.json() == {"message": RESEND_VERIFICATION_MESSAGE}
-    assert sent_emails == []
+    assert db_session.scalar(select(EmailOutbox.id)) is None
 
 
 def test_resend_verification_cooldown_returns_generic_response(
     api_client: TestClient,
     db_session: Session,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     user = create_unverified_user(db_session)
     create_verification_token(db_session, user.id)
-
-    sent_emails: list[tuple[str, str]] = []
-
-    def capture_email(recipient_email: str, raw_token: str) -> None:
-        sent_emails.append((recipient_email, raw_token))
-
-    monkeypatch.setattr(
-        "app.api.v1.endpoints.auth.send_verification_email",
-        capture_email,
-    )
 
     response = api_client.post(
         "/api/v1/auth/resend-verification",
@@ -310,4 +277,4 @@ def test_resend_verification_cooldown_returns_generic_response(
 
     assert response.status_code == 200
     assert response.json() == {"message": RESEND_VERIFICATION_MESSAGE}
-    assert sent_emails == []
+    assert db_session.scalar(select(EmailOutbox.id)) is None

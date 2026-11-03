@@ -9,24 +9,21 @@ from sqlalchemy.orm import Session
 
 from app.db.session import get_db_session
 from app.main import app
+from app.models.email_outbox import EmailOutbox
 from app.models.user import User
+from app.security.email_outbox_encryption import decrypt_email_payload
 
 
 @pytest.fixture
 def api_client(
     db_session: Session,
-    monkeypatch: pytest.MonkeyPatch,
+    configured_outbox_encryption: None,
 ) -> Generator[TestClient]:
     """Use the isolated integration-test session for HTTP requests."""
 
     def override_db_session() -> Generator[Session]:
         yield db_session
 
-    # Keep ordinary tests independent of terminal output.
-    monkeypatch.setattr(
-        "app.api.v1.endpoints.auth.send_verification_email",
-        lambda recipient_email, raw_token: None,
-    )
     app.dependency_overrides[get_db_session] = override_db_session
 
     try:
@@ -57,21 +54,10 @@ def test_register_endpoint_returns_generic_response(
     }
 
 
-def test_register_delivers_token_without_exposing_it_in_response(
+def test_register_queues_encrypted_token_without_exposing_it_in_response(
     api_client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
+    db_session: Session,
 ) -> None:
-    delivered: dict[str, str] = {}
-
-    def capture_delivery(recipient_email: str, raw_token: str) -> None:
-        delivered["recipient_email"] = recipient_email
-        delivered["raw_token"] = raw_token
-
-    monkeypatch.setattr(
-        "app.api.v1.endpoints.auth.send_verification_email",
-        capture_delivery,
-    )
-
     response = api_client.post(
         "/api/v1/auth/register",
         json={
@@ -88,13 +74,23 @@ def test_register_delivers_token_without_exposing_it_in_response(
             "a verification email will be sent shortly."
         )
     }
-    assert delivered["recipient_email"] == "delivery@example.com"
-    assert delivered["raw_token"]
-    assert delivered["raw_token"] not in response.text
+
+    job = db_session.scalar(
+        select(EmailOutbox).where(EmailOutbox.event_type == "email.verification")
+    )
+    assert job is not None
+    assert job.status == "pending"
+    assert job.encrypted_payload
+    payload = decrypt_email_payload(job.event_type, job.encrypted_payload)
+
+    assert payload["recipient"] == "delivery@example.com"
+    assert payload["display_name"] == "Delivery Test"
+    assert payload["verification_token"]
+    assert payload["verification_token"] not in response.text
     assert "token" not in response.json()
 
 
-def test_register_is_blocked_outside_development_and_testing(
+def test_register_queues_email_in_production_environment(
     api_client: TestClient,
     db_session: Session,
     monkeypatch: pytest.MonkeyPatch,
@@ -107,19 +103,24 @@ def test_register_is_blocked_outside_development_and_testing(
     response = api_client.post(
         "/api/v1/auth/register",
         json={
-            "email": "production-blocked@example.com",
-            "display_name": "Production Blocked",
+            "email": "production@example.com",
+            "display_name": "Production User",
             "password": "a-strong-test-password",
         },
     )
 
-    assert response.status_code == 503
-    assert response.json() == {
-        "detail": "Email verification delivery is not configured for this environment."
-    }
+    assert response.status_code == 202
 
-    user = db_session.scalar(select(User).where(User.email == "production-blocked@example.com"))
-    assert user is None
+    user = db_session.scalar(select(User).where(User.email == "production@example.com"))
+    assert user is not None
+
+    job = db_session.scalar(
+        select(EmailOutbox).where(EmailOutbox.event_type == "email.verification")
+    )
+    assert job is not None
+    payload = decrypt_email_payload(job.event_type, job.encrypted_payload)
+    assert payload["recipient"] == user.email
+    assert payload["display_name"] == user.display_name
 
 
 def test_register_endpoint_rejects_duplicate_email(

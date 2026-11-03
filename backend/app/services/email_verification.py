@@ -43,11 +43,11 @@ def create_verification_token(
     return raw_token
 
 
-def resend_verification_token(
+def _create_resend_token_for_user(
     session: Session,
     email: str,
-) -> str | None:
-    """Create a replacement token when the account is eligible and cooldown has passed."""
+) -> tuple[User, str] | None:
+    """Create a replacement token and return its locked user when eligible."""
     user = session.scalar(select(User).where(User.email == email).with_for_update())
 
     if user is None or user.email_verified_at is not None:
@@ -84,7 +84,25 @@ def resend_verification_token(
     for token in previous_tokens:
         token.expires_at = now
 
-    return create_verification_token(session, user.id)
+    raw_token = create_verification_token(session, user.id)
+    return user, raw_token
+
+
+def resend_verification_token(
+    session: Session,
+    email: str,
+) -> str | None:
+    """Create a replacement token when the account is eligible and cooldown has passed."""
+    result = _create_resend_token_for_user(session, email)
+    return result[1] if result is not None else None
+
+
+def resend_verification_email(
+    session: Session,
+    email: str,
+) -> tuple[User, str] | None:
+    """Create a replacement token and return its user for email enqueueing."""
+    return _create_resend_token_for_user(session, email)
 
 
 def verify_email_token(

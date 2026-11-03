@@ -18,7 +18,6 @@ from sqlalchemy.orm import Session
 from app.api.v1.dependencies.current_user import get_current_user
 from app.core.config import get_settings
 from app.db.session import get_db_session
-from app.integrations.email_delivery import send_verification_email
 from app.models.refresh_session import RefreshSession, RefreshTokenHistory
 from app.models.user import User
 from app.schemas.auth import (
@@ -34,9 +33,10 @@ from app.schemas.auth import (
 )
 from app.security.csrf import generate_csrf_token, validate_csrf_token
 from app.security.tokens import create_access_token
+from app.services.email_outbox import enqueue_email
 from app.services.email_verification import (
     EmailVerificationError,
-    resend_verification_token,
+    resend_verification_email,
     verify_email_token,
 )
 from app.services.login import (
@@ -57,6 +57,7 @@ from app.services.refresh_sessions import (
     rotate_refresh_token,
 )
 from app.services.registration import (
+    VERIFICATION_EMAIL_EVENT,
     EmailAlreadyRegisteredError,
     register_user_with_verification_token,
 )
@@ -170,7 +171,7 @@ def register(
     http_request: Request,
     session: Session = Depends(get_db_session),  # noqa: B008
 ) -> RegisterResponse:
-    """Register an account without revealing whether its email already exists."""
+    """Register an account and queue its verification email atomically."""
     client = http_request.client
     if client is None or not client.host:
         raise HTTPException(
@@ -191,28 +192,15 @@ def register(
         ],
     )
 
-    settings = get_settings()
-
-    if settings.environment.lower() not in {"development", "testing"}:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Email verification delivery is not configured for this environment.",
-        )
-
     try:
-        user, raw_token = register_user_with_verification_token(
-            session,
-            registration,
-        )
+        register_user_with_verification_token(session, registration)
+        session.commit()
     except EmailAlreadyRegisteredError:
-        return RegisterResponse(
-            message=(
-                "If an account can be created with this email, "
-                "a verification email will be sent shortly."
-            )
-        )
+        session.rollback()
+    except Exception:
+        session.rollback()
+        raise
 
-    send_verification_email(user.email, raw_token)
     return RegisterResponse(
         message=(
             "If an account can be created with this email, "
@@ -231,7 +219,7 @@ def resend_verification(
     http_request: Request,
     session: Session = Depends(get_db_session),  # noqa: B008
 ) -> ResendVerificationResponse:
-    """Resend verification email without revealing account status."""
+    """Queue a replacement verification email without revealing account status."""
     client = http_request.client
     if client is None or not client.host:
         raise HTTPException(
@@ -260,23 +248,23 @@ def resend_verification(
         ],
     )
 
-    settings = get_settings()
-
-    if settings.environment.lower() not in {"development", "testing"}:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Email verification delivery is not configured for this environment.",
-        )
-
     try:
-        raw_token = resend_verification_token(session, str(request.email))
+        resend_result = resend_verification_email(session, normalized_email)
+        if resend_result is not None:
+            user, raw_token = resend_result
+            enqueue_email(
+                session,
+                VERIFICATION_EMAIL_EVENT,
+                {
+                    "recipient": user.email,
+                    "display_name": user.display_name,
+                    "verification_token": raw_token,
+                },
+            )
         session.commit()
     except Exception:
         session.rollback()
         raise
-
-    if raw_token is not None:
-        send_verification_email(str(request.email), raw_token)
 
     return ResendVerificationResponse(
         message="If an eligible account exists, a verification email will be sent shortly."

@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -37,6 +38,27 @@ class Settings(BaseSettings):
         default="",
         repr=False,
     )
+
+    email_outbox_active_key_id: str = Field(
+        default="",
+        repr=False,
+    )
+
+    email_outbox_encryption_keys: str = Field(
+        default="{}",
+        repr=False,
+    )
+
+    smtp_host: str = Field(default="", repr=False)
+    smtp_port: int = Field(default=587, ge=1, le=65535)
+    smtp_username: str = Field(default="", repr=False)
+    smtp_password: str = Field(default="", repr=False)
+    smtp_from_email: str = ""
+    smtp_from_name: str = "RelaySphere"
+    smtp_tls_mode: Literal["starttls", "ssl", "none"] = "starttls"
+    smtp_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
+
+    email_verification_url: str = "http://localhost:5173/verify-email"
 
     cors_allowed_origins: str = "http://localhost:5173"
 

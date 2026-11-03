@@ -5,7 +5,10 @@ from sqlalchemy.orm import Session
 from app.models.user import User
 from app.schemas.auth import RegisterRequest
 from app.security.passwords import hash_password
+from app.services.email_outbox import enqueue_email
 from app.services.email_verification import create_verification_token
+
+VERIFICATION_EMAIL_EVENT = "email.verification"
 
 
 class EmailAlreadyRegisteredError(Exception):
@@ -16,7 +19,7 @@ def register_user(
     session: Session,
     registration: RegisterRequest,
 ) -> User:
-    """Create an unverified user without committing the transaction."""
+    """Create an unverified user without committing the caller's transaction."""
     email = str(registration.email).strip().lower()
 
     existing_user_id = session.scalar(select(User.id).where(User.email == email))
@@ -31,19 +34,16 @@ def register_user(
     )
 
     try:
-        session.add(user)
-        session.flush()
-        session.refresh(user)
+        with session.begin_nested():
+            session.add(user)
+            session.flush()
+            session.refresh(user)
     except IntegrityError as exc:
-        session.rollback()
-
-        # The database's unique constraint protects concurrent registrations.
         existing_user_id = session.scalar(select(User.id).where(User.email == email))
         if existing_user_id is not None:
             raise EmailAlreadyRegisteredError(
                 "An account with this email address already exists."
             ) from exc
-
         raise
 
     return user
@@ -53,13 +53,18 @@ def register_user_with_verification_token(
     session: Session,
     registration: RegisterRequest,
 ) -> tuple[User, str]:
-    """Create a user and verification token in one transaction."""
-    try:
-        user = register_user(session, registration)
-        raw_token = create_verification_token(session, user.id)
-        session.commit()
-    except Exception:
-        session.rollback()
-        raise
+    """Create a user, verification token, and encrypted email job atomically."""
+    user = register_user(session, registration)
+    raw_token = create_verification_token(session, user.id)
+
+    enqueue_email(
+        session,
+        VERIFICATION_EMAIL_EVENT,
+        {
+            "recipient": user.email,
+            "display_name": user.display_name,
+            "verification_token": raw_token,
+        },
+    )
 
     return user, raw_token
