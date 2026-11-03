@@ -130,3 +130,20 @@ class RevokeOthersResponse(BaseModel):
     """Report how many other sessions were revoked."""
 
     revoked_count: int = Field(ge=0)
+
+
+class SessionSummary(BaseModel):
+    """Describe one active session without exposing any credentials."""
+
+    id: uuid.UUID
+    created_at: datetime
+    last_used_at: datetime | None
+    expires_at: datetime
+    reauthenticated_until: datetime | None
+    is_current: bool
+
+
+class SessionListResponse(BaseModel):
+    """List the active sessions of the authenticated user."""
+
+    sessions: list[SessionSummary]

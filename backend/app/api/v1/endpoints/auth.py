@@ -32,6 +32,8 @@ from app.schemas.auth import (
     ResendVerificationResponse,
     RevokeOthersRequest,
     RevokeOthersResponse,
+    SessionListResponse,
+    SessionSummary,
     VerifyEmailRequest,
     VerifyEmailResponse,
 )
@@ -62,6 +64,7 @@ from app.services.refresh_sessions import (
     is_recently_reauthenticated,
     revoke_refresh_session,
     rotate_refresh_token,
+    session_is_expired,
 )
 from app.services.registration import (
     VERIFICATION_EMAIL_EVENT,
@@ -744,3 +747,54 @@ def revoke_other_sessions(
         raise
 
     return RevokeOthersResponse(revoked_count=len(others))
+
+
+_SESSION_LIST_LIMIT = 50
+
+
+@router.get(
+    "/sessions",
+    response_model=SessionListResponse,
+    status_code=status.HTTP_200_OK,
+)
+def list_sessions(
+    auth: tuple[User, RefreshSession] = Depends(get_current_auth),  # noqa: B008
+    session: Session = Depends(get_db_session),  # noqa: B008
+) -> SessionListResponse:
+    """List the caller's active sessions, current session first."""
+    user, current_session = auth
+    now = datetime.now(UTC)
+    candidates = session.scalars(
+        select(RefreshSession).where(
+            RefreshSession.user_id == user.id,
+            RefreshSession.revoked_at.is_(None),
+            RefreshSession.expires_at > now,
+        )
+    ).all()
+    active = [record for record in candidates if not session_is_expired(record, now)]
+
+    def sort_key(record: RefreshSession) -> tuple[bool, datetime]:
+        return (record.id == current_session.id, record.last_used_at or record.created_at)
+
+    active.sort(key=sort_key, reverse=True)
+
+    items = []
+    for record in active[:_SESSION_LIST_LIMIT]:
+        marker = record.reauthenticated_at
+        reauthenticated_until = None
+        if marker is not None and is_recently_reauthenticated(marker, now):
+            if marker.tzinfo is None:
+                marker = marker.replace(tzinfo=UTC)
+            reauthenticated_until = marker + REAUTH_WINDOW
+        items.append(
+            SessionSummary(
+                id=record.id,
+                created_at=record.created_at,
+                last_used_at=record.last_used_at,
+                expires_at=record.expires_at,
+                reauthenticated_until=reauthenticated_until,
+                is_current=record.id == current_session.id,
+            )
+        )
+
+    return SessionListResponse(sessions=items)
