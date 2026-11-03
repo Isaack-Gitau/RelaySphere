@@ -207,6 +207,7 @@ def test_resend_verification_queues_encrypted_replacement_token(
         select(EmailOutbox).where(EmailOutbox.event_type == "email.verification")
     )
     assert job is not None
+    assert job.encrypted_payload is not None
     payload = decrypt_email_payload(job.event_type, job.encrypted_payload)
     assert payload["recipient"] == user.email
     raw_token = payload["verification_token"]

@@ -27,6 +27,14 @@ class EmailOutboxEncryptionError(ValueError):
     """Raised when an email outbox payload cannot be safely encrypted or decrypted."""
 
 
+class EmailOutboxKeyConfigurationError(EmailOutboxEncryptionError):
+    """Raised when the configured email outbox keyring is invalid or unavailable."""
+
+
+class EmailOutboxKeyUnavailableError(EmailOutboxEncryptionError):
+    """Raised when an envelope references a key missing from the configured keyring."""
+
+
 def _validate_event_type(event_type: str) -> bytes:
     if not isinstance(event_type, str) or not _EVENT_TYPE_PATTERN.fullmatch(event_type):
         raise EmailOutboxEncryptionError("Invalid email outbox event type.")
@@ -62,59 +70,76 @@ def _get_key_ring() -> tuple[str, dict[str, bytes]]:
     active_key_id = settings.email_outbox_active_key_id
     encoded_key_ring = settings.email_outbox_encryption_keys
 
-    _validate_key_id(active_key_id)
-
-    if not isinstance(encoded_key_ring, str) or not encoded_key_ring:
-        raise EmailOutboxEncryptionError("EMAIL_OUTBOX_ENCRYPTION_KEYS is not configured.")
-
     try:
-        key_ring_data = json.loads(
-            encoded_key_ring,
-            object_pairs_hook=_reject_duplicate_json_keys,
-            parse_constant=_reject_json_constant,
-        )
-    except EmailOutboxEncryptionError:
-        raise
-    except (ValueError, TypeError) as exc:
-        raise EmailOutboxEncryptionError(
-            "EMAIL_OUTBOX_ENCRYPTION_KEYS must be a valid JSON object."
-        ) from exc
+        _validate_key_id(active_key_id)
 
-    if not isinstance(key_ring_data, dict) or not key_ring_data:
-        raise EmailOutboxEncryptionError(
-            "EMAIL_OUTBOX_ENCRYPTION_KEYS must contain at least one key."
-        )
-
-    key_ring: dict[str, bytes] = {}
-
-    for key_id, encoded_key in key_ring_data.items():
-        _validate_key_id(key_id)
-
-        if not isinstance(encoded_key, str) or not encoded_key:
-            raise EmailOutboxEncryptionError(
-                "Every email outbox encryption key must be a Base64 string."
+        if not isinstance(encoded_key_ring, str) or not encoded_key_ring:
+            raise EmailOutboxKeyConfigurationError(
+                "EMAIL_OUTBOX_ENCRYPTION_KEYS is not configured."
             )
 
         try:
-            key = base64.b64decode(encoded_key, validate=True)
+            key_ring_data = json.loads(
+                encoded_key_ring,
+                object_pairs_hook=_reject_duplicate_json_keys,
+                parse_constant=_reject_json_constant,
+            )
+        except EmailOutboxEncryptionError as exc:
+            raise EmailOutboxKeyConfigurationError(
+                "EMAIL_OUTBOX_ENCRYPTION_KEYS contains invalid JSON data."
+            ) from exc
         except (ValueError, TypeError) as exc:
-            raise EmailOutboxEncryptionError(
-                "An email outbox encryption key is not valid Base64."
+            raise EmailOutboxKeyConfigurationError(
+                "EMAIL_OUTBOX_ENCRYPTION_KEYS must be a valid JSON object."
             ) from exc
 
-        if len(key) != _KEY_LENGTH:
-            raise EmailOutboxEncryptionError(
-                "Every email outbox encryption key must decode to exactly 32 bytes."
+        if not isinstance(key_ring_data, dict) or not key_ring_data:
+            raise EmailOutboxKeyConfigurationError(
+                "EMAIL_OUTBOX_ENCRYPTION_KEYS must contain at least one key."
             )
 
-        key_ring[key_id] = key
+        key_ring: dict[str, bytes] = {}
 
-    if active_key_id not in key_ring:
-        raise EmailOutboxEncryptionError(
-            "The active email outbox encryption key ID is not in the key ring."
-        )
+        for key_id, encoded_key in key_ring_data.items():
+            try:
+                _validate_key_id(key_id)
+            except EmailOutboxEncryptionError as exc:
+                raise EmailOutboxKeyConfigurationError(
+                    "The email outbox keyring contains an invalid key ID."
+                ) from exc
 
-    return active_key_id, key_ring
+            if not isinstance(encoded_key, str) or not encoded_key:
+                raise EmailOutboxKeyConfigurationError(
+                    "Every email outbox encryption key must be a Base64 string."
+                )
+
+            try:
+                key = base64.b64decode(encoded_key, validate=True)
+            except (ValueError, TypeError) as exc:
+                raise EmailOutboxKeyConfigurationError(
+                    "An email outbox encryption key is not valid Base64."
+                ) from exc
+
+            if len(key) != _KEY_LENGTH:
+                raise EmailOutboxKeyConfigurationError(
+                    "Every email outbox encryption key must decode to exactly 32 bytes."
+                )
+
+            key_ring[key_id] = key
+
+        if active_key_id not in key_ring:
+            raise EmailOutboxKeyConfigurationError(
+                "The active email outbox encryption key ID is not in the key ring."
+            )
+
+        return active_key_id, key_ring
+
+    except EmailOutboxKeyConfigurationError:
+        raise
+    except EmailOutboxEncryptionError as exc:
+        raise EmailOutboxKeyConfigurationError(
+            "The email outbox encryption keyring is invalid."
+        ) from exc
 
 
 def _associated_data(event_type: str, key_id: str) -> bytes:
@@ -207,7 +232,7 @@ def decrypt_email_payload(
 
     key = key_ring.get(key_id)
     if key is None:
-        raise EmailOutboxEncryptionError(
+        raise EmailOutboxKeyUnavailableError(
             "The encryption key required for this email outbox payload is unavailable."
         )
 
