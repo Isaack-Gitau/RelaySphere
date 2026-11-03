@@ -1,4 +1,4 @@
-﻿import uuid
+import uuid
 from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace

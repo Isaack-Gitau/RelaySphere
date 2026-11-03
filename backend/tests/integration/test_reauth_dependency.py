@@ -1,4 +1,4 @@
-﻿from collections.abc import Generator
+from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 

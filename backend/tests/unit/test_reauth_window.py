@@ -1,4 +1,4 @@
-﻿from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from app.services.refresh_sessions import REAUTH_WINDOW, is_recently_reauthenticated
 

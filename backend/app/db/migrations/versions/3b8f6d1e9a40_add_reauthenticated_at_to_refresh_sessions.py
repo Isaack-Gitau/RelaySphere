@@ -1,4 +1,4 @@
-﻿"""add reauthenticated_at to refresh sessions
+"""add reauthenticated_at to refresh sessions
 
 Revision ID: 3b8f6d1e9a40
 Revises: 0bd78bf5f36a
