@@ -130,3 +130,57 @@ def test_sixth_attempt_is_rate_limited(api_client: TestClient, db_session: Sessi
     response = api_client.post("/api/v1/auth/reauth", json={"password": _PASSWORD}, headers=headers)
     assert response.status_code == 429
     assert int(response.headers["retry-after"]) >= 1
+
+
+def test_ip_bucket_limits_across_users(api_client: TestClient, db_session: Session) -> None:
+    """The per-IP bucket trips on its own when every user stays under their own limit."""
+    for _ in range(20):
+        _, headers = _setup(db_session)
+        response = api_client.post(
+            "/api/v1/auth/reauth", json={"password": "Wrong-Password-42!"}, headers=headers
+        )
+        assert response.status_code == 403
+    _, headers = _setup(db_session)
+    response = api_client.post("/api/v1/auth/reauth", json={"password": _PASSWORD}, headers=headers)
+    assert response.status_code == 429
+    assert int(response.headers["retry-after"]) >= 1
+
+
+def test_untrusted_origin_is_rejected_before_any_work(
+    api_client: TestClient, db_session: Session
+) -> None:
+    record, headers = _setup(db_session)
+    response = api_client.post(
+        "/api/v1/auth/reauth",
+        json={"password": _PASSWORD},
+        headers={**headers, "Origin": "https://attacker.example"},
+    )
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Untrusted request origin."}
+    db_session.refresh(record)
+    assert record.reauthenticated_at is None
+
+    # The rejected request must not have consumed rate-limit budget: five wrong
+    # attempts are still allowed afterwards.
+    for _ in range(5):
+        wrong = api_client.post(
+            "/api/v1/auth/reauth", json={"password": "Wrong-Password-42!"}, headers=headers
+        )
+        assert wrong.status_code == 403
+
+
+def test_success_response_window_matches_stored_marker(
+    api_client: TestClient, db_session: Session
+) -> None:
+    record, headers = _setup(db_session)
+    response = api_client.post("/api/v1/auth/reauth", json={"password": _PASSWORD}, headers=headers)
+    assert response.status_code == 200
+    until = datetime.fromisoformat(response.json()["reauthenticated_until"])
+    if until.tzinfo is None:
+        until = until.replace(tzinfo=UTC)
+    db_session.refresh(record)
+    marker = record.reauthenticated_at
+    assert marker is not None
+    if marker.tzinfo is None:
+        marker = marker.replace(tzinfo=UTC)
+    assert until - marker == timedelta(minutes=10)
