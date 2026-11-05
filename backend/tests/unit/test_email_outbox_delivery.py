@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.core.email_change import EMAIL_CHANGE_EMAIL_EVENT
 from app.core.password_reset import PASSWORD_RESET_EMAIL_EVENT
 from app.integrations.smtp_transport import EmailDeliveryError
 from app.services import email_outbox_delivery as delivery
@@ -529,6 +530,247 @@ def test_deliver_email_job_translates_password_reset_composition_failure(
         delivery.deliver_email_job(
             make_job(event_type="email.password_reset"),
             settings=make_reset_settings(),
+            sender=lambda message: pytest.fail("Email must not be sent."),
+        )
+
+    assert error.value.code == "email_message_composition_failed"
+    assert error.value.transient is False
+    assert "Sensitive composition detail" not in str(error.value)
+
+def make_email_change_settings():
+    return SimpleNamespace(
+        email_change_url="https://app.example.test/confirm-email-change",
+        smtp_from_email="noreply@example.test",
+        smtp_from_name="RelaySphere",
+    )
+
+
+def make_email_change_payload():
+    return {
+        "recipient": "new-address@example.test",
+        "display_name": "RelaySphere User",
+        "email_change_token": "test-email-change-token",
+    }
+
+
+@pytest.fixture
+def decrypted_email_change_payload(monkeypatch):
+    payload = make_email_change_payload()
+
+    monkeypatch.setattr(
+        delivery,
+        "decrypt_email_payload",
+        lambda event_type, encrypted_payload: payload,
+    )
+
+    return payload
+
+
+def test_email_change_event_constant_matches_core_policy() -> None:
+    assert delivery.EMAIL_CHANGE_EVENT_TYPE == EMAIL_CHANGE_EMAIL_EVENT
+    assert delivery.EMAIL_CHANGE_EVENT_TYPE == "email.email_change"
+
+
+def test_deliver_email_job_composes_and_sends_email_change_email(
+    monkeypatch,
+    decrypted_email_change_payload,
+):
+    sent_messages = []
+    compose_calls = []
+
+    def compose(**kwargs):
+        compose_calls.append(kwargs)
+        return make_message(kwargs["recipient_email"])
+
+    monkeypatch.setattr(delivery, "compose_email_change_email", compose)
+
+    delivery.deliver_email_job(
+        make_job(event_type=EMAIL_CHANGE_EMAIL_EVENT),
+        settings=make_email_change_settings(),
+        sender=sent_messages.append,
+    )
+
+    assert len(sent_messages) == 1
+    assert sent_messages[0]["To"] == "new-address@example.test"
+    assert compose_calls == [
+        {
+            "recipient_email": "new-address@example.test",
+            "display_name": "RelaySphere User",
+            "raw_token": "test-email-change-token",
+            "confirmation_url": "https://app.example.test/confirm-email-change",
+            "sender_email": "noreply@example.test",
+            "sender_name": "RelaySphere",
+        }
+    ]
+
+
+def test_deliver_email_change_job_uses_smtp_transport(
+    monkeypatch,
+    decrypted_email_change_payload,
+):
+    sent = []
+    config = make_email_change_settings()
+
+    monkeypatch.setattr(
+        delivery,
+        "compose_email_change_email",
+        lambda **kwargs: make_message(kwargs["recipient_email"]),
+    )
+    monkeypatch.setattr(
+        delivery,
+        "send_email",
+        lambda message, settings: sent.append((message, settings)),
+    )
+
+    delivery.deliver_email_job(
+        make_job(event_type=EMAIL_CHANGE_EMAIL_EVENT),
+        settings=config,
+    )
+
+    assert len(sent) == 1
+    assert sent[0][0]["To"] == "new-address@example.test"
+    assert sent[0][1] is config
+
+
+def test_deliver_email_change_job_builds_real_confirmation_message(
+    decrypted_email_change_payload,
+):
+    sent_messages = []
+
+    delivery.deliver_email_job(
+        make_job(event_type=EMAIL_CHANGE_EMAIL_EVENT),
+        settings=make_email_change_settings(),
+        sender=sent_messages.append,
+    )
+
+    assert len(sent_messages) == 1
+    message = sent_messages[0]
+
+    assert message["Subject"] == "Confirm your RelaySphere email address"
+    assert message["To"] == "new-address@example.test"
+
+    plain_part = message.get_body(preferencelist=("plain",))
+    assert plain_part is not None
+
+    plain_text = plain_part.get_content()
+    assert "24 hours" in plain_text
+    assert (
+        "https://app.example.test/confirm-email-change"
+        "?token=test-email-change-token"
+    ) in plain_text
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected_code"),
+    [
+        ("recipient", "", "email_recipient_invalid"),
+        (
+            "recipient",
+            "new-address@example.test,other@example.test",
+            "email_recipient_invalid",
+        ),
+        ("display_name", "", "email_display_name_invalid"),
+        ("display_name", None, "email_display_name_invalid"),
+        ("email_change_token", "", "email_change_token_invalid"),
+        ("email_change_token", None, "email_change_token_invalid"),
+    ],
+)
+def test_deliver_email_change_job_rejects_invalid_payload_fields(
+    monkeypatch,
+    field,
+    value,
+    expected_code,
+):
+    payload = make_email_change_payload()
+    payload[field] = value
+
+    monkeypatch.setattr(
+        delivery,
+        "decrypt_email_payload",
+        lambda *args: payload,
+    )
+
+    with pytest.raises(EmailDeliveryError) as error:
+        delivery.deliver_email_job(
+            make_job(event_type=EMAIL_CHANGE_EMAIL_EVENT),
+            settings=make_email_change_settings(),
+            sender=lambda message: pytest.fail("Email must not be sent."),
+        )
+
+    assert error.value.code == expected_code
+    assert error.value.transient is False
+
+
+@pytest.mark.parametrize(
+    "wrong_token_field",
+    ["verification_token", "password_reset_token"],
+)
+def test_email_change_job_rejects_other_email_flow_tokens(
+    monkeypatch,
+    wrong_token_field,
+):
+    payload = {
+        "recipient": "new-address@example.test",
+        "display_name": "RelaySphere User",
+        wrong_token_field: "not-an-email-change-token",
+    }
+    monkeypatch.setattr(
+        delivery,
+        "decrypt_email_payload",
+        lambda *args: payload,
+    )
+
+    with pytest.raises(EmailDeliveryError) as error:
+        delivery.deliver_email_job(
+            make_job(event_type=EMAIL_CHANGE_EMAIL_EVENT),
+            settings=make_email_change_settings(),
+            sender=lambda message: pytest.fail("Email must not be sent."),
+        )
+
+    assert error.value.code == "email_change_token_invalid"
+    assert error.value.transient is False
+
+
+def test_email_change_job_rejects_multiple_recipients(
+    monkeypatch,
+    decrypted_email_change_payload,
+):
+    monkeypatch.setattr(
+        delivery,
+        "compose_email_change_email",
+        lambda **kwargs: make_message(
+            "new-address@example.test, other@example.test"
+        ),
+    )
+
+    with pytest.raises(EmailDeliveryError) as error:
+        delivery.deliver_email_job(
+            make_job(event_type=EMAIL_CHANGE_EMAIL_EVENT),
+            settings=make_email_change_settings(),
+            sender=lambda message: pytest.fail("Email must not be sent."),
+        )
+
+    assert error.value.code == "email_recipient_policy_violation"
+    assert error.value.transient is False
+
+
+def test_email_change_job_translates_composition_failure(
+    monkeypatch,
+    decrypted_email_change_payload,
+):
+    def fail_composition(**kwargs):
+        raise ValueError("Sensitive composition detail")
+
+    monkeypatch.setattr(
+        delivery,
+        "compose_email_change_email",
+        fail_composition,
+    )
+
+    with pytest.raises(EmailDeliveryError) as error:
+        delivery.deliver_email_job(
+            make_job(event_type=EMAIL_CHANGE_EMAIL_EVENT),
+            settings=make_email_change_settings(),
             sender=lambda message: pytest.fail("Email must not be sent."),
         )
 

@@ -178,3 +178,36 @@ class ResetPasswordResponse(BaseModel):
     """Confirm that the password was reset."""
 
     message: str
+
+class EmailChangeStartRequest(BaseModel):
+    """Validate a request to change the authenticated account's email."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    new_email: EmailStr
+
+    @field_validator("new_email", mode="after")
+    @classmethod
+    def normalize_new_email(cls, value: EmailStr) -> str:
+        """Normalize the target address before processing."""
+        return str(value).lower()
+
+
+class EmailChangeStartResponse(BaseModel):
+    """Return a generic response for an email-change request."""
+
+    message: str
+
+
+class EmailChangeConfirmRequest(BaseModel):
+    """Validate an email-change confirmation token."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    token: str = Field(min_length=1, max_length=256)
+
+
+class EmailChangeConfirmResponse(BaseModel):
+    """Confirm that the account email was changed."""
+
+    message: str

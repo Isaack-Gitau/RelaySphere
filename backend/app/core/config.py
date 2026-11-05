@@ -60,6 +60,7 @@ class Settings(BaseSettings):
 
     email_verification_url: str = "http://localhost:5173/verify-email"
     email_password_reset_url: str = "http://localhost:5173/reset-password"
+    email_change_url: str = "http://localhost:5173/confirm-email-change"
 
     cors_allowed_origins: str = "http://localhost:5173"
 

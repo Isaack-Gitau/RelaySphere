@@ -4,8 +4,10 @@ from email.utils import getaddresses, parseaddr
 from typing import Any
 
 from app.core.config import Settings, get_settings
+from app.core.email_change import EMAIL_CHANGE_EMAIL_EVENT
 from app.core.password_reset import PASSWORD_RESET_EMAIL_EVENT as PASSWORD_RESET_EVENT_TYPE
 from app.integrations.email_messages import (
+    compose_email_change_email,
     compose_password_reset_email,
     compose_verification_email,
 )
@@ -19,6 +21,7 @@ from app.security.email_outbox_encryption import (
 )
 
 VERIFICATION_EVENT_TYPE = "email.verification"
+EMAIL_CHANGE_EVENT_TYPE = EMAIL_CHANGE_EMAIL_EVENT
 
 
 def _validate_recipient_and_display_name(payload: dict[str, Any]) -> tuple[str, str]:
@@ -75,6 +78,20 @@ def _validate_password_reset_payload(payload: dict[str, Any]) -> tuple[str, str,
     return recipient, display_name, raw_token
 
 
+def _validate_email_change_payload(payload: dict[str, Any]) -> tuple[str, str, str]:
+    """Validate the decrypted fields required for an email-change email."""
+    recipient, display_name = _validate_recipient_and_display_name(payload)
+    raw_token = payload.get("email_change_token")
+
+    if not isinstance(raw_token, str) or not raw_token:
+        raise EmailDeliveryError(
+            "email_change_token_invalid",
+            transient=False,
+        )
+
+    return recipient, display_name, raw_token
+
+
 def deliver_email_job(
     job: EmailOutbox,
     *,
@@ -86,7 +103,11 @@ def deliver_email_job(
     This function performs no database operations. The caller must ensure
     the job was claimed and committed before invoking external delivery.
     """
-    if job.event_type not in (VERIFICATION_EVENT_TYPE, PASSWORD_RESET_EVENT_TYPE):
+    if job.event_type not in (
+        VERIFICATION_EVENT_TYPE,
+        PASSWORD_RESET_EVENT_TYPE,
+        EMAIL_CHANGE_EVENT_TYPE,
+    ):
         raise EmailDeliveryError("email_event_type_unsupported", transient=False)
 
     if job.encrypted_payload is None:
@@ -110,7 +131,24 @@ def deliver_email_job(
             transient=False,
         ) from exc
 
-    if job.event_type == PASSWORD_RESET_EVENT_TYPE:
+    if job.event_type == EMAIL_CHANGE_EVENT_TYPE:
+        recipient, display_name, raw_token = _validate_email_change_payload(payload)
+
+        try:
+            message = compose_email_change_email(
+                recipient_email=recipient,
+                display_name=display_name,
+                raw_token=raw_token,
+                confirmation_url=config.email_change_url,
+                sender_email=config.smtp_from_email,
+                sender_name=config.smtp_from_name,
+            )
+        except (TypeError, ValueError) as exc:
+            raise EmailDeliveryError(
+                "email_message_composition_failed",
+                transient=False,
+            ) from exc
+    elif job.event_type == PASSWORD_RESET_EVENT_TYPE:
         recipient, display_name, raw_token = _validate_password_reset_payload(payload)
 
         try:

@@ -17,12 +17,17 @@ from sqlalchemy.orm import Session
 
 from app.api.v1.dependencies.current_user import get_current_auth, get_current_user
 from app.core.config import get_settings
+from app.core.email_change import EMAIL_CHANGE_EMAIL_EVENT
 from app.core.password_reset import PASSWORD_RESET_EMAIL_EVENT
 from app.db.session import get_db_session
 from app.models.refresh_session import RefreshSession, RefreshTokenHistory
 from app.models.user import User
 from app.schemas.auth import (
     CurrentUserResponse,
+    EmailChangeConfirmRequest,
+    EmailChangeConfirmResponse,
+    EmailChangeStartRequest,
+    EmailChangeStartResponse,
     ForgotPasswordRequest,
     ForgotPasswordResponse,
     LoginRequest,
@@ -45,6 +50,11 @@ from app.schemas.auth import (
 from app.security.csrf import generate_csrf_token, validate_csrf_token
 from app.security.tokens import create_access_token
 from app.services.email_outbox import enqueue_email
+from app.services.email_change import (
+    EmailChangeError,
+    confirm_email_change,
+    request_email_change,
+)
 from app.services.email_verification import (
     EmailVerificationError,
     resend_verification_email,
@@ -919,3 +929,177 @@ def list_sessions(
         )
 
     return SessionListResponse(sessions=items)
+
+@router.post(
+    "/email-change/request",
+    response_model=EmailChangeStartResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def start_email_change(
+    request: EmailChangeStartRequest,
+    http_request: Request,
+    auth: tuple[User, RefreshSession] = Depends(get_current_auth),  # noqa: B008
+    session: Session = Depends(get_db_session),  # noqa: B008
+) -> EmailChangeStartResponse:
+    """Request an email change after recent reauthentication."""
+    user, current_session = auth
+    client = http_request.client
+
+    if client is None or not client.host:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Service temporarily unavailable.",
+        )
+
+    normalized_email = user.email.strip().casefold()
+
+    _enforce_rate_limit(
+        http_request,
+        [
+            RateLimitBucket(
+                scope="auth:email-change-request:ip",
+                kind="ip",
+                identifier=client.host,
+                limit=10,
+                window_seconds=900,
+            ),
+            RateLimitBucket(
+                scope="auth:email-change-request:user",
+                kind="email",
+                identifier=normalized_email,
+                limit=5,
+                window_seconds=900,
+            ),
+        ],
+    )
+
+    try:
+        # Preserve the email-change service's lock order:
+        # user first, then the current refresh session.
+        locked_user = session.scalar(
+            select(User)
+            .where(User.id == user.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+
+        if locked_user is None or not locked_user.is_active:
+            session.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Could not validate credentials.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        current = session.scalar(
+            select(RefreshSession)
+            .where(
+                RefreshSession.id == current_session.id,
+                RefreshSession.user_id == locked_user.id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+
+        now = datetime.now(UTC)
+
+        if (
+            current is None
+            or current.revoked_at is not None
+            or session_is_expired(current, now)
+        ):
+            session.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Could not validate credentials.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        if not is_recently_reauthenticated(current.reauthenticated_at, now):
+            session.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="reauthentication_required",
+            )
+
+        result = request_email_change(
+            session,
+            locked_user.id,
+            str(request.new_email),
+        )
+
+        if result is not None:
+            requested_user, new_email, raw_token = result
+
+            enqueue_email(
+                session,
+                EMAIL_CHANGE_EMAIL_EVENT,
+                {
+                    "recipient": new_email,
+                    "display_name": requested_user.display_name,
+                    "email_change_token": raw_token,
+                },
+            )
+
+        # The request record and encrypted outbox job commit atomically.
+        session.commit()
+
+    except HTTPException:
+        raise
+    except Exception:
+        session.rollback()
+        raise
+
+    return EmailChangeStartResponse(
+        message="If the address is eligible, a confirmation email will be sent shortly."
+    )
+
+
+@router.post(
+    "/email-change/confirm",
+    response_model=EmailChangeConfirmResponse,
+    status_code=status.HTTP_200_OK,
+)
+def confirm_email_change_endpoint(
+    request: EmailChangeConfirmRequest,
+    http_request: Request,
+    session: Session = Depends(get_db_session),  # noqa: B008
+) -> EmailChangeConfirmResponse:
+    """Confirm an email change and revoke the account's active sessions."""
+    client = http_request.client
+
+    if client is None or not client.host:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Service temporarily unavailable.",
+        )
+
+    _enforce_rate_limit(
+        http_request,
+        [
+            RateLimitBucket(
+                scope="auth:email-change-confirm:ip",
+                kind="ip",
+                identifier=client.host,
+                limit=10,
+                window_seconds=900,
+            ),
+        ],
+    )
+
+    try:
+        confirm_email_change(session, request.token)
+        session.commit()
+    except EmailChangeError as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired confirmation token.",
+        ) from exc
+    except Exception:
+        session.rollback()
+        raise
+
+    return EmailChangeConfirmResponse(
+        message="Email address updated successfully. Please sign in again."
+    )

@@ -3,10 +3,12 @@ from email.utils import formataddr
 from html import escape
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from app.core.email_change import EMAIL_CHANGE_TOKEN_EXPIRY_MINUTES
 from app.core.password_reset import PASSWORD_RESET_TOKEN_EXPIRY_MINUTES
 
 VERIFICATION_EMAIL_SUBJECT = "Verify your RelaySphere email address"
 PASSWORD_RESET_EMAIL_SUBJECT = "Reset your RelaySphere password"
+EMAIL_CHANGE_EMAIL_SUBJECT = "Confirm your RelaySphere email address"
 
 
 def _build_token_url(base_url: str, raw_token: str, purpose: str) -> str:
@@ -54,6 +56,11 @@ def build_verification_url(base_url: str, raw_token: str) -> str:
 def build_password_reset_url(base_url: str, raw_token: str) -> str:
     """Build a password reset URL containing the URL-encoded token."""
     return _build_token_url(base_url, raw_token, "password reset")
+
+
+def build_email_change_url(base_url: str, raw_token: str) -> str:
+    """Build an email-change confirmation URL containing the token."""
+    return _build_token_url(base_url, raw_token, "email change")
 
 
 def compose_verification_email(
@@ -180,6 +187,77 @@ RelaySphere
     <p>This link expires in {minutes} minutes and can be used only once.</p>
     <p>If you did not request a password reset, you can ignore this email.
     Your password will not change unless you use the link above.</p>
+    <p>RelaySphere</p>
+  </body>
+</html>
+""",
+        subtype="html",
+    )
+
+    return message
+
+
+def compose_email_change_email(
+    *,
+    recipient_email: str,
+    display_name: str,
+    raw_token: str,
+    confirmation_url: str,
+    sender_email: str,
+    sender_name: str = "RelaySphere",
+) -> EmailMessage:
+    """Compose an email-change confirmation with plain-text and HTML alternatives."""
+    if not recipient_email.strip():
+        raise ValueError("A recipient email address is required.")
+
+    if not sender_email.strip():
+        raise ValueError("A sender email address is required.")
+
+    if not display_name.strip():
+        raise ValueError("A display name is required.")
+
+    link = build_email_change_url(confirmation_url, raw_token)
+    expiry_hours = EMAIL_CHANGE_TOKEN_EXPIRY_MINUTES // 60
+
+    safe_name = escape(display_name)
+    safe_link = escape(link, quote=True)
+
+    message = EmailMessage()
+    message["Subject"] = EMAIL_CHANGE_EMAIL_SUBJECT
+    message["From"] = formataddr((sender_name, sender_email))
+    message["To"] = recipient_email
+
+    message.set_content(
+        f"""Hello {display_name},
+
+We received a request to change the email address associated with your
+RelaySphere account to this address.
+
+To confirm this change, open the link below:
+
+{link}
+
+This link expires in {expiry_hours} hours and can be used only once.
+Your current email address will remain unchanged until confirmation.
+
+If you did not request this change, you can ignore this email.
+
+RelaySphere
+"""
+    )
+
+    message.add_alternative(
+        f"""<!doctype html>
+<html lang="en">
+  <body>
+    <p>Hello {safe_name},</p>
+    <p>We received a request to change the email address associated with
+    your RelaySphere account to this address.</p>
+    <p>To confirm this change, click the link below:</p>
+    <p><a href="{safe_link}">Confirm email address</a></p>
+    <p>This link expires in {expiry_hours} hours and can be used only once.
+    Your current email address will remain unchanged until confirmation.</p>
+    <p>If you did not request this change, you can ignore this email.</p>
     <p>RelaySphere</p>
   </body>
 </html>
