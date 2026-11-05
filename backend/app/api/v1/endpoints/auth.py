@@ -1,4 +1,5 @@
 import hmac
+import uuid
 from datetime import UTC, datetime
 
 from fastapi import (
@@ -12,7 +13,7 @@ from fastapi import (
     status,
 )
 from sqlalchemy import select
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.api.v1.dependencies.current_user import get_current_auth, get_current_user
@@ -44,17 +45,21 @@ from app.schemas.auth import (
     RevokeOthersResponse,
     SessionListResponse,
     SessionSummary,
+    UsernameReservationRequest,
+    UsernameReservationResponse,
+    UsernameSuggestionsRequest,
+    UsernameSuggestionsResponse,
     VerifyEmailRequest,
     VerifyEmailResponse,
 )
 from app.security.csrf import generate_csrf_token, validate_csrf_token
 from app.security.tokens import create_access_token
-from app.services.email_outbox import enqueue_email
 from app.services.email_change import (
     EmailChangeError,
     confirm_email_change,
     request_email_change,
 )
+from app.services.email_outbox import enqueue_email
 from app.services.email_verification import (
     EmailVerificationError,
     resend_verification_email,
@@ -91,6 +96,12 @@ from app.services.registration import (
     EmailAlreadyRegisteredError,
     register_user_with_verification_token,
 )
+from app.services.username_reservations import (
+    UsernameReservationExistsError,
+    UsernameUnavailableError,
+    create_username_reservation,
+)
+from app.services.username_suggestions import suggest_usernames
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -177,7 +188,7 @@ def _clear_auth_cookies(response: Response) -> None:
 def _require_csrf(
     csrf_cookie: str | None,
     csrf_header: str | None,
-    session_id: object,
+    session_id: str | uuid.UUID,
 ) -> None:
     if (
         not csrf_cookie
@@ -189,6 +200,130 @@ def _require_csrf(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="CSRF validation failed.",
         )
+
+
+@router.post(
+    "/username-reservations",
+    response_model=UsernameReservationResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_username_reservation_endpoint(
+    request: UsernameReservationRequest,
+    http_request: Request,
+    session: Session = Depends(get_db_session),  # noqa: B008
+) -> UsernameReservationResponse:
+    """Reserve a username for a registration attempt."""
+    client = http_request.client
+    if client is None or not client.host:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Service temporarily unavailable.",
+        )
+
+    _enforce_rate_limit(
+        http_request,
+        [
+            RateLimitBucket(
+                scope="auth:username-reservations:create:ip",
+                kind="ip",
+                identifier=client.host,
+                limit=10,
+                window_seconds=900,
+            )
+        ],
+    )
+
+    try:
+        with session.begin():
+            created = create_username_reservation(
+                session,
+                request.username,
+                request.registration_attempt_id,
+            )
+    except UsernameUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="USERNAME_UNAVAILABLE",
+        ) from exc
+    except UsernameReservationExistsError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="USERNAME_RESERVATION_EXISTS",
+        ) from exc
+    except IntegrityError as exc:
+        constraint_name = getattr(
+            getattr(exc.orig, "diag", None),
+            "constraint_name",
+            None,
+        )
+        if constraint_name == "uq_username_claims_username":
+            detail = "USERNAME_UNAVAILABLE"
+        elif constraint_name == "uq_username_claims_reservation_attempt":
+            detail = "USERNAME_RESERVATION_EXISTS"
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Service temporarily unavailable.",
+            ) from exc
+
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=detail,
+        ) from exc
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Service temporarily unavailable.",
+        ) from exc
+
+    return UsernameReservationResponse(
+        reservation_id=created.reservation_id,
+        username=created.username,
+        reservation_token=created.reservation_token,
+        expires_at=created.expires_at,
+    )
+
+
+@router.post(
+    "/username-suggestions",
+    response_model=UsernameSuggestionsResponse,
+    status_code=status.HTTP_200_OK,
+)
+def username_suggestions_endpoint(
+    request: UsernameSuggestionsRequest,
+    http_request: Request,
+    session: Session = Depends(get_db_session),  # noqa: B008
+) -> UsernameSuggestionsResponse:
+    """Return available username suggestions without reserving them."""
+    client = http_request.client
+    if client is None or not client.host:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Service temporarily unavailable.",
+        )
+
+    _enforce_rate_limit(
+        http_request,
+        [
+            RateLimitBucket(
+                scope="auth:username-suggestions:ip",
+                kind="ip",
+                identifier=client.host,
+                limit=30,
+                window_seconds=3600,
+            ),
+        ],
+    )
+
+    try:
+        suggestions = suggest_usernames(session, request.display_name)
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Service temporarily unavailable.",
+        ) from exc
+
+    return UsernameSuggestionsResponse(suggestions=suggestions)
 
 
 @router.post(

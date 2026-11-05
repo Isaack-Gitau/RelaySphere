@@ -1,10 +1,14 @@
 import uuid
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import Boolean, DateTime, String, Uuid, func
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
+
+if TYPE_CHECKING:
+    from app.models.username_claim import UsernameClaim
 
 
 class User(Base):
@@ -59,3 +63,17 @@ class User(Base):
         onupdate=func.now(),
         nullable=False,
     )
+
+    username_claim: Mapped["UsernameClaim | None"] = relationship(
+        "UsernameClaim",
+        uselist=False,
+        viewonly=True,
+        lazy="selectin",
+    )
+
+    @property
+    def username(self) -> str | None:
+        """Return the user's permanent username claim, if assigned."""
+        if self.username_claim is None:
+            return None
+        return self.username_claim.username

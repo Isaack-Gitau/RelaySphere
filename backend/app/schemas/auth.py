@@ -5,6 +5,80 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, StrictBool, field_validator
 
 
+class UsernameSuggestionsRequest(BaseModel):
+    """Validate a display name used to generate username suggestions."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str = Field(min_length=1, max_length=80)
+
+    @field_validator("display_name", mode="before")
+    @classmethod
+    def normalize_display_name(cls, value: object) -> object:
+        """Trim surrounding whitespace before validating the display name."""
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+
+class UsernameSuggestionsResponse(BaseModel):
+    """Return at most five available username suggestions."""
+
+    suggestions: list[str] = Field(max_length=5)
+
+
+class UsernameReservationRequest(BaseModel):
+    """Validate a username reservation request."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    username: str = Field(
+        min_length=3,
+        max_length=30,
+        pattern=r"^[a-z][a-z0-9_]{1,28}[a-z0-9]$",
+    )
+    registration_attempt_id: uuid.UUID
+
+    @field_validator("username")
+    @classmethod
+    def reject_consecutive_underscores(cls, value: str) -> str:
+        if "__" in value:
+            raise ValueError("Username cannot contain consecutive underscores.")
+        return value
+
+    @field_validator("registration_attempt_id")
+    @classmethod
+    def require_uuid_v4(cls, value: uuid.UUID) -> uuid.UUID:
+        """Require a client-generated UUID version 4."""
+        if value.version != 4:
+            raise ValueError("Registration attempt ID must be a UUIDv4.")
+        return value
+
+
+class UsernameReservationResponse(BaseModel):
+    """Return the one-time reservation credential and expiry."""
+
+    reservation_id: uuid.UUID
+    username: str = Field(
+        min_length=3,
+        max_length=30,
+        pattern=r"^[a-z][a-z0-9_]{1,28}[a-z0-9]$",
+    )
+    reservation_token: str = Field(
+        min_length=43,
+        max_length=43,
+        pattern=r"^[A-Za-z0-9_-]{43}$",
+    )
+    expires_at: datetime
+
+    @field_validator("username")
+    @classmethod
+    def reject_consecutive_underscores(cls, value: str) -> str:
+        if "__" in value:
+            raise ValueError("Username cannot contain consecutive underscores.")
+        return value
+
+
 class RegisterRequest(BaseModel):
     """Validate a new RelaySphere account registration request."""
 

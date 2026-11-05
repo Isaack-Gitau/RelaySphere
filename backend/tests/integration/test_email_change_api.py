@@ -1,5 +1,5 @@
-from collections.abc import Generator
 import uuid
+from collections.abc import Generator
 from datetime import UTC, datetime
 from types import SimpleNamespace
 

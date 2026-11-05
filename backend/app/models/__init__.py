@@ -5,6 +5,7 @@ from app.models.password_reset_token import PasswordResetToken
 from app.models.rate_limit_counter import RateLimitCounter
 from app.models.refresh_session import RefreshSession, RefreshTokenHistory
 from app.models.user import User
+from app.models.username_claim import UsernameClaim
 
 __all__ = [
     "EmailChangeRequest",
@@ -15,4 +16,5 @@ __all__ = [
     "RefreshSession",
     "RefreshTokenHistory",
     "User",
+    "UsernameClaim",
 ]

@@ -100,6 +100,14 @@ ROUTE_CASES = [
         ],
         id="reset-password",
     ),
+    pytest.param(
+        "/api/v1/auth/username-suggestions",
+        {"display_name": "Isaack Gitau"},
+        [
+            ("auth:username-suggestions:ip", "ip", 30, 3600, "testclient"),
+        ],
+        id="username-suggestions",
+    ),
 ]
 
 
