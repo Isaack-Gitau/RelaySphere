@@ -17,11 +17,14 @@ from sqlalchemy.orm import Session
 
 from app.api.v1.dependencies.current_user import get_current_auth, get_current_user
 from app.core.config import get_settings
+from app.core.password_reset import PASSWORD_RESET_EMAIL_EVENT
 from app.db.session import get_db_session
 from app.models.refresh_session import RefreshSession, RefreshTokenHistory
 from app.models.user import User
 from app.schemas.auth import (
     CurrentUserResponse,
+    ForgotPasswordRequest,
+    ForgotPasswordResponse,
     LoginRequest,
     LoginResponse,
     ReauthRequest,
@@ -30,6 +33,8 @@ from app.schemas.auth import (
     RegisterResponse,
     ResendVerificationRequest,
     ResendVerificationResponse,
+    ResetPasswordRequest,
+    ResetPasswordResponse,
     RevokeOthersRequest,
     RevokeOthersResponse,
     SessionListResponse,
@@ -50,6 +55,11 @@ from app.services.login import (
     authenticate_user,
     get_access_token_expiry_seconds,
     verify_reauth_password,
+)
+from app.services.password_reset import (
+    PasswordResetError,
+    confirm_password_reset,
+    request_password_reset,
 )
 from app.services.rate_limiting import (
     RateLimitBucket,
@@ -278,6 +288,117 @@ def resend_verification(
 
     return ResendVerificationResponse(
         message="If an eligible account exists, a verification email will be sent shortly."
+    )
+
+
+@router.post(
+    "/forgot-password",
+    response_model=ForgotPasswordResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def forgot_password(
+    request: ForgotPasswordRequest,
+    http_request: Request,
+    session: Session = Depends(get_db_session),  # noqa: B008
+) -> ForgotPasswordResponse:
+    """Queue a password reset email without revealing account status."""
+    client = http_request.client
+    if client is None or not client.host:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Service temporarily unavailable.",
+        )
+
+    normalized_email = str(request.email).strip().casefold()
+    _enforce_rate_limit(
+        http_request,
+        [
+            RateLimitBucket(
+                scope="auth:forgot-password:ip",
+                kind="ip",
+                identifier=client.host,
+                limit=5,
+                window_seconds=3600,
+            ),
+            RateLimitBucket(
+                scope="auth:forgot-password:ip-email",
+                kind="email",
+                identifier=f"{client.host}\\0{normalized_email}",
+                limit=3,
+                window_seconds=3600,
+            ),
+        ],
+    )
+
+    try:
+        reset_result = request_password_reset(session, normalized_email)
+        if reset_result is not None:
+            user, raw_token = reset_result
+            enqueue_email(
+                session,
+                PASSWORD_RESET_EMAIL_EVENT,
+                {
+                    "recipient": user.email,
+                    "display_name": user.display_name,
+                    "password_reset_token": raw_token,
+                },
+            )
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+
+    return ForgotPasswordResponse(
+        message="If an eligible account exists, a password reset email will be sent shortly."
+    )
+
+
+@router.post(
+    "/reset-password",
+    response_model=ResetPasswordResponse,
+    status_code=status.HTTP_200_OK,
+)
+def reset_password(
+    request: ResetPasswordRequest,
+    http_request: Request,
+    session: Session = Depends(get_db_session),  # noqa: B008
+) -> ResetPasswordResponse:
+    """Set a new password using a reset token and revoke every session."""
+    client = http_request.client
+    if client is None or not client.host:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Service temporarily unavailable.",
+        )
+
+    _enforce_rate_limit(
+        http_request,
+        [
+            RateLimitBucket(
+                scope="auth:reset-password:ip",
+                kind="ip",
+                identifier=client.host,
+                limit=10,
+                window_seconds=900,
+            ),
+        ],
+    )
+
+    try:
+        confirm_password_reset(session, request.token, request.new_password)
+        session.commit()
+    except PasswordResetError as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired reset token.",
+        ) from exc
+    except Exception:
+        session.rollback()
+        raise
+
+    return ResetPasswordResponse(
+        message="Password reset successfully. Please log in with your new password."
     )
 
 

@@ -77,6 +77,29 @@ ROUTE_CASES = [
         ],
         id="verify-email",
     ),
+    pytest.param(
+        "/api/v1/auth/forgot-password",
+        {"email": "rate-limit@example.com"},
+        [
+            ("auth:forgot-password:ip", "ip", 5, 3600, "testclient"),
+            (
+                "auth:forgot-password:ip-email",
+                "email",
+                3,
+                3600,
+                "testclient\\0rate-limit@example.com",
+            ),
+        ],
+        id="forgot-password",
+    ),
+    pytest.param(
+        "/api/v1/auth/reset-password",
+        {"token": "reset-token", "new_password": "a-strong-new-password"},
+        [
+            ("auth:reset-password:ip", "ip", 10, 900, "testclient"),
+        ],
+        id="reset-password",
+    ),
 ]
 
 

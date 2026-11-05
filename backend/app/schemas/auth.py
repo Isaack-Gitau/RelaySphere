@@ -147,3 +147,34 @@ class SessionListResponse(BaseModel):
     """List the active sessions of the authenticated user."""
 
     sessions: list[SessionSummary]
+
+
+class ForgotPasswordRequest(BaseModel):
+    """Validate a request to start a password reset."""
+
+    email: EmailStr
+
+    @field_validator("email", mode="after")
+    @classmethod
+    def normalize_email(cls, value: EmailStr) -> str:
+        """Normalize email addresses for consistent account lookup."""
+        return str(value).lower()
+
+
+class ForgotPasswordResponse(BaseModel):
+    """Return a generic response without revealing account status."""
+
+    message: str
+
+
+class ResetPasswordRequest(BaseModel):
+    """Validate a password reset confirmation."""
+
+    token: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=12, max_length=128)
+
+
+class ResetPasswordResponse(BaseModel):
+    """Confirm that the password was reset."""
+
+    message: str
