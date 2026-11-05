@@ -4,7 +4,11 @@ from email.utils import getaddresses, parseaddr
 from typing import Any
 
 from app.core.config import Settings, get_settings
-from app.integrations.email_messages import compose_verification_email
+from app.core.password_reset import PASSWORD_RESET_EMAIL_EVENT as PASSWORD_RESET_EVENT_TYPE
+from app.integrations.email_messages import (
+    compose_password_reset_email,
+    compose_verification_email,
+)
 from app.integrations.smtp_transport import EmailDeliveryError, send_email
 from app.models.email_outbox import EmailOutbox
 from app.security.email_outbox_encryption import (
@@ -17,11 +21,10 @@ from app.security.email_outbox_encryption import (
 VERIFICATION_EVENT_TYPE = "email.verification"
 
 
-def _validate_verification_payload(payload: dict[str, Any]) -> tuple[str, str, str]:
-    """Validate the decrypted fields required for a verification email."""
+def _validate_recipient_and_display_name(payload: dict[str, Any]) -> tuple[str, str]:
+    """Validate the recipient and display name shared by every supported email."""
     recipient = payload.get("recipient")
     display_name = payload.get("display_name")
-    raw_token = payload.get("verification_token")
 
     if not isinstance(recipient, str) or not recipient.strip():
         raise EmailDeliveryError("email_recipient_invalid", transient=False)
@@ -41,9 +44,31 @@ def _validate_verification_payload(payload: dict[str, Any]) -> tuple[str, str, s
     if not isinstance(display_name, str) or not display_name.strip():
         raise EmailDeliveryError("email_display_name_invalid", transient=False)
 
+    return recipient, display_name
+
+
+def _validate_verification_payload(payload: dict[str, Any]) -> tuple[str, str, str]:
+    """Validate the decrypted fields required for a verification email."""
+    recipient, display_name = _validate_recipient_and_display_name(payload)
+    raw_token = payload.get("verification_token")
+
     if not isinstance(raw_token, str) or not raw_token:
         raise EmailDeliveryError(
             "email_verification_token_invalid",
+            transient=False,
+        )
+
+    return recipient, display_name, raw_token
+
+
+def _validate_password_reset_payload(payload: dict[str, Any]) -> tuple[str, str, str]:
+    """Validate the decrypted fields required for a password reset email."""
+    recipient, display_name = _validate_recipient_and_display_name(payload)
+    raw_token = payload.get("password_reset_token")
+
+    if not isinstance(raw_token, str) or not raw_token:
+        raise EmailDeliveryError(
+            "email_password_reset_token_invalid",
             transient=False,
         )
 
@@ -61,7 +86,7 @@ def deliver_email_job(
     This function performs no database operations. The caller must ensure
     the job was claimed and committed before invoking external delivery.
     """
-    if job.event_type != VERIFICATION_EVENT_TYPE:
+    if job.event_type not in (VERIFICATION_EVENT_TYPE, PASSWORD_RESET_EVENT_TYPE):
         raise EmailDeliveryError("email_event_type_unsupported", transient=False)
 
     if job.encrypted_payload is None:
@@ -85,22 +110,40 @@ def deliver_email_job(
             transient=False,
         ) from exc
 
-    recipient, display_name, raw_token = _validate_verification_payload(payload)
+    if job.event_type == PASSWORD_RESET_EVENT_TYPE:
+        recipient, display_name, raw_token = _validate_password_reset_payload(payload)
 
-    try:
-        message = compose_verification_email(
-            recipient_email=recipient,
-            display_name=display_name,
-            raw_token=raw_token,
-            verification_url=config.email_verification_url,
-            sender_email=config.smtp_from_email,
-            sender_name=config.smtp_from_name,
-        )
-    except (TypeError, ValueError) as exc:
-        raise EmailDeliveryError(
-            "email_message_composition_failed",
-            transient=False,
-        ) from exc
+        try:
+            message = compose_password_reset_email(
+                recipient_email=recipient,
+                display_name=display_name,
+                raw_token=raw_token,
+                reset_url=config.email_password_reset_url,
+                sender_email=config.smtp_from_email,
+                sender_name=config.smtp_from_name,
+            )
+        except (TypeError, ValueError) as exc:
+            raise EmailDeliveryError(
+                "email_message_composition_failed",
+                transient=False,
+            ) from exc
+    else:
+        recipient, display_name, raw_token = _validate_verification_payload(payload)
+
+        try:
+            message = compose_verification_email(
+                recipient_email=recipient,
+                display_name=display_name,
+                raw_token=raw_token,
+                verification_url=config.email_verification_url,
+                sender_email=config.smtp_from_email,
+                sender_name=config.smtp_from_name,
+            )
+        except (TypeError, ValueError) as exc:
+            raise EmailDeliveryError(
+                "email_message_composition_failed",
+                transient=False,
+            ) from exc
 
     # Enforce the one-recipient invariant immediately before SMTP delivery.
     if len(message.get_all("To", [])) != 1 or message.get_all("Cc") or message.get_all("Bcc"):

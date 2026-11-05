@@ -6,14 +6,14 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.password_reset import (
+    PASSWORD_RESET_COOLDOWN_SECONDS,
+    PASSWORD_RESET_TOKEN_EXPIRY_MINUTES,
+)
 from app.models.password_reset_token import PasswordResetToken
 from app.models.refresh_session import RefreshSession
 from app.models.user import User
 from app.security.passwords import hash_password
-
-PASSWORD_RESET_TOKEN_EXPIRY_MINUTES = 30
-PASSWORD_RESET_COOLDOWN_SECONDS = 60
-PASSWORD_RESET_EMAIL_EVENT = "email.password_reset"
 
 _INVALID_TOKEN_MESSAGE = "Invalid or expired reset token."
 

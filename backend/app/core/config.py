@@ -59,6 +59,7 @@ class Settings(BaseSettings):
     smtp_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
 
     email_verification_url: str = "http://localhost:5173/verify-email"
+    email_password_reset_url: str = "http://localhost:5173/reset-password"
 
     cors_allowed_origins: str = "http://localhost:5173"
 

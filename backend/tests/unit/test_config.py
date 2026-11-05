@@ -32,6 +32,7 @@ def isolated_settings(
         "SMTP_TLS_MODE",
         "SMTP_TIMEOUT_SECONDS",
         "EMAIL_VERIFICATION_URL",
+        "EMAIL_PASSWORD_RESET_URL",
         "EMAIL_OUTBOX_ACTIVE_KEY_ID",
         "EMAIL_OUTBOX_ENCRYPTION_KEYS",
         "CORS_ALLOWED_ORIGINS",
@@ -66,6 +67,7 @@ def test_settings_use_expected_defaults(
     assert settings.smtp_tls_mode == "starttls"
     assert settings.smtp_timeout_seconds == 10.0
     assert settings.email_verification_url == "http://localhost:5173/verify-email"
+    assert settings.email_password_reset_url == "http://localhost:5173/reset-password"
     assert settings.cors_allowed_origins == "http://localhost:5173"
     assert settings.access_token_expire_minutes == 15
     assert settings.session_idle_timeout_minutes == 30
@@ -98,6 +100,10 @@ def test_settings_read_environment_variables(
         "EMAIL_VERIFICATION_URL",
         "https://app.example.test/verify-email",
     )
+    monkeypatch.setenv(
+        "EMAIL_PASSWORD_RESET_URL",
+        "https://app.example.test/reset-password",
+    )
     monkeypatch.setenv("CORS_ALLOWED_ORIGINS", "http://localhost:5173,https://example.test")
     monkeypatch.setenv("ACCESS_TOKEN_EXPIRE_MINUTES", "20")
     monkeypatch.setenv("SESSION_IDLE_TIMEOUT_MINUTES", "45")
@@ -124,6 +130,7 @@ def test_settings_read_environment_variables(
     assert settings.smtp_tls_mode == "ssl"
     assert settings.smtp_timeout_seconds == 15
     assert settings.email_verification_url == "https://app.example.test/verify-email"
+    assert settings.email_password_reset_url == "https://app.example.test/reset-password"
     assert settings.cors_allowed_origins == "http://localhost:5173,https://example.test"
     assert settings.access_token_expire_minutes == 20
     assert settings.session_idle_timeout_minutes == 45
