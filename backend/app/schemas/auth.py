@@ -285,3 +285,24 @@ class EmailChangeConfirmResponse(BaseModel):
     """Confirm that the account email was changed."""
 
     message: str
+
+
+class UsernameReservationReleaseRequest(BaseModel):
+    """Validate the credentials needed to release a username reservation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    registration_attempt_id: uuid.UUID
+    reservation_token: str = Field(
+        min_length=43,
+        max_length=43,
+        pattern=r"^[A-Za-z0-9_-]{43}$",
+    )
+
+    @field_validator("registration_attempt_id")
+    @classmethod
+    def require_uuid_v4(cls, value: uuid.UUID) -> uuid.UUID:
+        """Accept only client-generated UUIDv4 registration attempt IDs."""
+        if value.version != 4:
+            raise ValueError("registration_attempt_id must be a UUIDv4.")
+        return value

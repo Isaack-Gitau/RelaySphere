@@ -1,4 +1,4 @@
-﻿import uuid
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -9,6 +9,7 @@ from app.models.username_claim import UsernameClaim
 from app.security.username_reservations import (
     generate_reservation_token,
     hash_reservation_token,
+    verify_reservation_token,
 )
 
 RESERVATION_LIFETIME = timedelta(minutes=5)
@@ -145,3 +146,59 @@ def create_username_reservation(
         reservation_token=reservation_token,
         expires_at=reservation.expires_at,
     )
+
+
+_DUMMY_TOKEN = "A" * 43
+_DUMMY_TOKEN_HASH = "0" * 64
+
+
+class UsernameReservationInvalidError(Exception):
+    """The reservation ID, attempt ID, or token does not match an active reservation."""
+
+
+class UsernameReservationExpiredError(Exception):
+    """The credentials match a reservation that has already expired."""
+
+
+def release_username_reservation(
+    session: Session,
+    reservation_id: uuid.UUID,
+    registration_attempt_id: uuid.UUID,
+    reservation_token: str,
+) -> None:
+    """Delete a matching reservation inside the caller's transaction.
+
+    Only the registration-attempt advisory lock is taken, using the same key as
+    creation. Release never waits for a second advisory lock while holding one,
+    so it cannot deadlock with creation's sorted two-lock order.
+
+    The caller is responsible for committing or rolling back the transaction.
+    """
+    attempt_lock_key = f"relaysphere:registration-attempt:{registration_attempt_id}"
+    session.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(attempt_lock_key, 0))))
+
+    db_now = session.scalar(select(func.clock_timestamp()))
+    if db_now is None:
+        raise RuntimeError("Database clock is unavailable.")
+
+    claim = session.scalar(
+        select(UsernameClaim)
+        .where(
+            UsernameClaim.id == reservation_id,
+            UsernameClaim.claim_type == "reservation",
+            UsernameClaim.registration_attempt_id == registration_attempt_id,
+        )
+        .with_for_update()
+    )
+
+    stored_hash = claim.token_hash if claim is not None and claim.token_hash else _DUMMY_TOKEN_HASH
+    token_matches = verify_reservation_token(reservation_token, stored_hash)
+
+    if claim is None or not token_matches:
+        raise UsernameReservationInvalidError
+
+    if claim.expires_at is None or claim.expires_at <= db_now:
+        raise UsernameReservationExpiredError
+
+    session.delete(claim)
+    session.flush()

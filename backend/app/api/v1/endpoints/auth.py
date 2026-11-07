@@ -45,6 +45,7 @@ from app.schemas.auth import (
     RevokeOthersResponse,
     SessionListResponse,
     SessionSummary,
+    UsernameReservationReleaseRequest,
     UsernameReservationRequest,
     UsernameReservationResponse,
     UsernameSuggestionsRequest,
@@ -98,8 +99,11 @@ from app.services.registration import (
 )
 from app.services.username_reservations import (
     UsernameReservationExistsError,
+    UsernameReservationExpiredError,
+    UsernameReservationInvalidError,
     UsernameUnavailableError,
     create_username_reservation,
+    release_username_reservation,
 )
 from app.services.username_suggestions import suggest_usernames
 
@@ -1238,3 +1242,68 @@ def confirm_email_change_endpoint(
     return EmailChangeConfirmResponse(
         message="Email address updated successfully. Please sign in again."
     )
+
+
+@router.delete(
+    "/username-reservations/{reservation_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
+def release_username_reservation_endpoint(
+    reservation_id: uuid.UUID,
+    request: UsernameReservationReleaseRequest,
+    http_request: Request,
+    session: Session = Depends(get_db_session),  # noqa: B008
+) -> Response:
+    """Release a username reservation using its attempt ID and one-time token."""
+    client = http_request.client
+    if client is None or not client.host:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Service temporarily unavailable.",
+        )
+
+    _enforce_rate_limit(
+        http_request,
+        [
+            RateLimitBucket(
+                scope="auth:username-reservations:release:ip",
+                kind="ip",
+                identifier=client.host,
+                limit=20,
+                window_seconds=900,
+            ),
+        ],
+    )
+
+    try:
+        release_username_reservation(
+            session,
+            reservation_id,
+            request.registration_attempt_id,
+            request.reservation_token,
+        )
+        session.commit()
+    except UsernameReservationInvalidError as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="USERNAME_RESERVATION_INVALID",
+        ) from exc
+    except UsernameReservationExpiredError as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="USERNAME_RESERVATION_EXPIRED",
+        ) from exc
+    except SQLAlchemyError as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Service temporarily unavailable.",
+        ) from exc
+    except Exception:
+        session.rollback()
+        raise
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
