@@ -1,4 +1,5 @@
 import uuid
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -17,9 +18,9 @@ VALID_ATTEMPT_ID = uuid.UUID("550e8400-e29b-41d4-a716-446655440000")
 VALID_RESERVATION_ID = uuid.UUID("a1b2c3d4-e5f6-4789-8123-456789abcdef")
 
 
-def registration_fields(**overrides: object) -> dict[str, object]:
+def registration_fields(**overrides: object) -> dict[str, Any]:
     """Return a valid registration payload; tests override only the field they check."""
-    fields: dict[str, object] = {
+    fields: dict[str, Any] = {
         "email": "isaack@example.com",
         "display_name": "Isaack",
         "password": "correct-horse-battery",
