@@ -1,3 +1,4 @@
+from app.models.block import Block
 from app.models.email_change_request import EmailChangeRequest
 from app.models.email_outbox import EmailOutbox
 from app.models.email_verification_token import EmailVerificationToken
@@ -9,6 +10,7 @@ from app.models.user_preferences import UserPreferences
 from app.models.username_claim import UsernameClaim
 
 __all__ = [
+    "Block",
     "EmailChangeRequest",
     "EmailOutbox",
     "EmailVerificationToken",
