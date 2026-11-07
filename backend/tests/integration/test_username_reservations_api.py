@@ -1,4 +1,4 @@
-﻿import uuid
+import uuid
 from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
 
@@ -61,15 +61,11 @@ def test_create_username_reservation_returns_201_and_plaintext_token_once(
     assert body["expires_at"]
 
     claim = db_session.scalar(
-        select(UsernameClaim).where(
-            UsernameClaim.id == uuid.UUID(body["reservation_id"])
-        )
+        select(UsernameClaim).where(UsernameClaim.id == uuid.UUID(body["reservation_id"]))
     )
     assert claim is not None
     assert claim.claim_type == "reservation"
-    assert claim.registration_attempt_id == uuid.UUID(
-        payload["registration_attempt_id"]
-    )
+    assert claim.registration_attempt_id == uuid.UUID(payload["registration_attempt_id"])
     assert claim.token_hash != body["reservation_token"]
     assert verify_reservation_token(
         body["reservation_token"],
