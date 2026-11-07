@@ -33,6 +33,10 @@ ROUTE_CASES = [
             "email": "rate-limit@example.com",
             "display_name": "Rate Limit Test",
             "password": "a-strong-test-password",
+            "username": "rate_limit_user",
+            "reservation_id": "a1b2c3d4-e5f6-4789-8123-456789abcdef",
+            "registration_attempt_id": "550e8400-e29b-41d4-a716-446655440000",
+            "reservation_token": "A" * 43,
         },
         [
             ("auth:register:ip", "ip", 5, 3600, "testclient"),

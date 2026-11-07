@@ -82,9 +82,39 @@ class UsernameReservationResponse(BaseModel):
 class RegisterRequest(BaseModel):
     """Validate a new RelaySphere account registration request."""
 
+    model_config = ConfigDict(extra="forbid")
+
     email: EmailStr
     display_name: str = Field(min_length=1, max_length=80)
     password: str = Field(min_length=12, max_length=128)
+    username: str = Field(
+        min_length=3,
+        max_length=30,
+        pattern=r"^[a-z][a-z0-9_]{1,28}[a-z0-9]$",
+    )
+    reservation_id: uuid.UUID
+    registration_attempt_id: uuid.UUID
+    reservation_token: str = Field(
+        min_length=43,
+        max_length=43,
+        pattern=r"^[A-Za-z0-9_-]{43}$",
+    )
+
+    @field_validator("username")
+    @classmethod
+    def reject_consecutive_underscores(cls, value: str) -> str:
+        """Reject usernames containing consecutive underscores."""
+        if "__" in value:
+            raise ValueError("Username cannot contain consecutive underscores.")
+        return value
+
+    @field_validator("registration_attempt_id")
+    @classmethod
+    def require_uuid_v4(cls, value: uuid.UUID) -> uuid.UUID:
+        """Require a client-generated UUID version 4."""
+        if value.version != 4:
+            raise ValueError("Registration attempt ID must be a UUIDv4.")
+        return value
 
     @field_validator("email", mode="after")
     @classmethod

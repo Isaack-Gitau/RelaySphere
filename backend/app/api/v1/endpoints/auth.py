@@ -365,7 +365,25 @@ def register(
         register_user_with_verification_token(session, registration)
         session.commit()
     except EmailAlreadyRegisteredError:
+        # Generic 202. The service burned the valid reservation, so a duplicate email
+        # leaves the same username state as a new account. Commit to keep that.
+        try:
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+    except UsernameReservationInvalidError as exc:
         session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="USERNAME_RESERVATION_INVALID",
+        ) from exc
+    except UsernameReservationExpiredError as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="USERNAME_RESERVATION_EXPIRED",
+        ) from exc
     except Exception:
         session.rollback()
         raise

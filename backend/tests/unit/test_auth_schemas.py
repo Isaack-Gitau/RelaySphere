@@ -13,12 +13,31 @@ from app.schemas.auth import (
     UsernameSuggestionsResponse,
 )
 
+VALID_ATTEMPT_ID = uuid.UUID("550e8400-e29b-41d4-a716-446655440000")
+VALID_RESERVATION_ID = uuid.UUID("a1b2c3d4-e5f6-4789-8123-456789abcdef")
+
+
+def registration_fields(**overrides: object) -> dict[str, object]:
+    """Return a valid registration payload; tests override only the field they check."""
+    fields: dict[str, object] = {
+        "email": "isaack@example.com",
+        "display_name": "Isaack",
+        "password": "correct-horse-battery",
+        "username": "isaack_gitau",
+        "reservation_id": VALID_RESERVATION_ID,
+        "registration_attempt_id": VALID_ATTEMPT_ID,
+        "reservation_token": "A" * 43,
+    }
+    fields.update(overrides)
+    return fields
+
 
 def test_registration_normalizes_email_and_display_name() -> None:
     request = RegisterRequest(
-        email="  Isaack@example.com  ",
-        display_name="  Isaack Gitau  ",
-        password="correct-horse-battery",
+        **registration_fields(
+            email="  Isaack@example.com  ",
+            display_name="  Isaack Gitau  ",
+        )
     )
 
     assert request.email == "isaack@example.com"
@@ -31,11 +50,7 @@ def test_registration_normalizes_email_and_display_name() -> None:
 )
 def test_registration_rejects_invalid_email(email: str) -> None:
     with pytest.raises(ValidationError):
-        RegisterRequest(
-            email=email,
-            display_name="Isaack",
-            password="correct-horse-battery",
-        )
+        RegisterRequest(**registration_fields(email=email))
 
 
 @pytest.mark.parametrize("display_name", ["", "   ", "\t\n"])
@@ -43,20 +58,12 @@ def test_registration_rejects_blank_display_name(
     display_name: str,
 ) -> None:
     with pytest.raises(ValidationError):
-        RegisterRequest(
-            email="isaack@example.com",
-            display_name=display_name,
-            password="correct-horse-battery",
-        )
+        RegisterRequest(**registration_fields(display_name=display_name))
 
 
 def test_registration_rejects_display_name_over_80_characters() -> None:
     with pytest.raises(ValidationError):
-        RegisterRequest(
-            email="isaack@example.com",
-            display_name="a" * 81,
-            password="correct-horse-battery",
-        )
+        RegisterRequest(**registration_fields(display_name="a" * 81))
 
 
 @pytest.mark.parametrize("password", ["short", "a" * 129])
@@ -64,23 +71,75 @@ def test_registration_rejects_password_outside_length_limits(
     password: str,
 ) -> None:
     with pytest.raises(ValidationError):
-        RegisterRequest(
-            email="isaack@example.com",
-            display_name="Isaack",
-            password=password,
-        )
+        RegisterRequest(**registration_fields(password=password))
 
 
 def test_registration_preserves_password_exactly() -> None:
     password = "  intentional password  "
 
-    request = RegisterRequest(
-        email="isaack@example.com",
-        display_name="Isaack",
-        password=password,
-    )
+    request = RegisterRequest(**registration_fields(password=password))
 
     assert request.password == password
+
+
+def test_registration_accepts_reservation_fields() -> None:
+    request = RegisterRequest(**registration_fields())
+
+    assert request.username == "isaack_gitau"
+    assert request.reservation_id == VALID_RESERVATION_ID
+    assert request.registration_attempt_id.version == 4
+    assert request.reservation_token == "A" * 43
+
+
+@pytest.mark.parametrize(
+    "username",
+    [
+        "ab",
+        "A_valid_name",
+        "1invalid",
+        "_invalid",
+        "invalid_",
+        "invalid__name",
+        "invalid-name",
+        "name with spaces",
+        "a" * 31,
+    ],
+)
+def test_registration_rejects_invalid_usernames(username: str) -> None:
+    with pytest.raises(ValidationError):
+        RegisterRequest(**registration_fields(username=username))
+
+
+def test_registration_rejects_non_v4_attempt_id() -> None:
+    with pytest.raises(ValidationError):
+        RegisterRequest(
+            **registration_fields(
+                registration_attempt_id=uuid.UUID("550e8400-e29b-11d4-a716-446655440000")
+            )
+        )
+
+
+@pytest.mark.parametrize("token", ["", "short", "A" * 42, "A" * 44, "!" * 43])
+def test_registration_rejects_malformed_reservation_tokens(token: str) -> None:
+    with pytest.raises(ValidationError):
+        RegisterRequest(**registration_fields(reservation_token=token))
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["username", "reservation_id", "registration_attempt_id", "reservation_token"],
+)
+def test_registration_requires_every_reservation_field(field: str) -> None:
+    fields = registration_fields()
+    del fields[field]
+
+    with pytest.raises(ValidationError):
+        RegisterRequest(**fields)
+
+
+def test_registration_rejects_unexpected_fields() -> None:
+    with pytest.raises(ValidationError):
+        RegisterRequest(**registration_fields(extra="not allowed"))
 
 
 def test_login_normalizes_email_and_preserves_password() -> None:
