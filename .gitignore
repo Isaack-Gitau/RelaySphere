@@ -41,3 +41,12 @@ storage/
 
 # Backup snapshots
 *.bak-*
+
+# Private keys and certificates
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Local review artifacts
+backend/review-diff.txt
