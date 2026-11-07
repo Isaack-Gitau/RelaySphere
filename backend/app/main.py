@@ -5,6 +5,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.v1.endpoints.auth import router as auth_router
+from app.api.v1.endpoints.user_discovery import router as user_discovery_router
 from app.api.v1.endpoints.users import router as users_router
 from app.core.config import get_settings
 from app.core.origins import parse_allowed_origins
@@ -52,6 +53,7 @@ app.add_middleware(
 
 app.include_router(auth_router, prefix=settings.api_v1_prefix)
 app.include_router(users_router, prefix=settings.api_v1_prefix)
+app.include_router(user_discovery_router, prefix=settings.api_v1_prefix)
 
 
 @app.get("/api/v1/health", tags=["Health"])
