@@ -6,9 +6,10 @@ import unicodedata
 import uuid
 from dataclasses import dataclass
 
-from sqlalchemy import and_, case, collate, func, literal_column, or_, select
+from sqlalchemy import and_, case, collate, exists, func, literal_column, or_, select
 from sqlalchemy.orm import Session
 
+from app.models.block import Block
 from app.models.user import User
 from app.models.username_claim import UsernameClaim
 
@@ -113,6 +114,16 @@ def _eligibility_conditions() -> tuple:
     )
 
 
+def _not_blocked_either_way(viewer_id: uuid.UUID):
+    """Exclude users who blocked the viewer and users the viewer blocked."""
+    return ~exists().where(
+        or_(
+            and_(Block.blocker_id == viewer_id, Block.blocked_id == User.id),
+            and_(Block.blocker_id == User.id, Block.blocked_id == viewer_id),
+        )
+    )
+
+
 def search_users(
     session: Session,
     caller_id: uuid.UUID,
@@ -131,7 +142,12 @@ def search_users(
         select(User.id, UsernameClaim.username, User.display_name, rank.label("rank"))
         .select_from(User)
         .join(UsernameClaim, UsernameClaim.user_id == User.id)
-        .where(*_eligibility_conditions(), User.id != caller_id, or_(username_match, display_match))
+        .where(
+            *_eligibility_conditions(),
+            User.id != caller_id,
+            _not_blocked_either_way(caller_id),
+            or_(username_match, display_match),
+        )
     )
 
     if position is not None:
@@ -154,14 +170,22 @@ def search_users(
     return SearchPage(items=items, next_cursor=next_cursor)
 
 
-def get_eligible_user(session: Session, user_id: uuid.UUID) -> DirectoryEntry | None:
+def get_eligible_user(
+    session: Session,
+    user_id: uuid.UUID,
+    viewer_id: uuid.UUID | None = None,
+) -> DirectoryEntry | None:
     """Return the public entry for an eligible user, or None for anyone else."""
-    row = session.execute(
+    statement = (
         select(User.id, UsernameClaim.username, User.display_name)
         .select_from(User)
         .join(UsernameClaim, UsernameClaim.user_id == User.id)
         .where(*_eligibility_conditions(), User.id == user_id)
-    ).first()
+    )
+    if viewer_id is not None:
+        statement = statement.where(_not_blocked_either_way(viewer_id))
+
+    row = session.execute(statement).first()
 
     if row is None:
         return None

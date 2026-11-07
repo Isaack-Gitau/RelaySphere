@@ -131,7 +131,7 @@ def get_user_endpoint(
     )
 
     try:
-        entry = get_eligible_user(session, user_id)
+        entry = get_eligible_user(session, user_id, viewer_id=current_user.id)
     except SQLAlchemyError as exc:
         session.rollback()
         raise HTTPException(
