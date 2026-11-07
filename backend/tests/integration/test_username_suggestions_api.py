@@ -32,11 +32,14 @@ def api_client(db_session: Session) -> Generator[TestClient]:
 
 def count_reservations(session: Session) -> int:
     """Count temporary username reservations."""
-    return session.scalar(
-        select(func.count())
-        .select_from(UsernameClaim)
-        .where(UsernameClaim.claim_type == "reservation")
-    ) or 0
+    return (
+        session.scalar(
+            select(func.count())
+            .select_from(UsernameClaim)
+            .where(UsernameClaim.claim_type == "reservation")
+        )
+        or 0
+    )
 
 
 def test_username_suggestions_returns_available_candidates(

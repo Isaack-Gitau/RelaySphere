@@ -57,20 +57,16 @@ def test_username_claim_has_database_constraints() -> None:
 
 def test_username_claim_has_partial_unique_indexes() -> None:
     indexes = {
-        index.name: index
-        for index in UsernameClaim.__table__.indexes
-        if isinstance(index, Index)
+        index.name: index for index in UsernameClaim.__table__.indexes if isinstance(index, Index)
     }
 
     assert indexes["uq_username_claims_permanent_user"].unique is True
-    assert list(indexes["uq_username_claims_permanent_user"].columns.keys()) == [
-        "user_id"
-    ]
+    assert list(indexes["uq_username_claims_permanent_user"].columns.keys()) == ["user_id"]
 
     assert indexes["uq_username_claims_reservation_attempt"].unique is True
-    assert list(
-        indexes["uq_username_claims_reservation_attempt"].columns.keys()
-    ) == ["registration_attempt_id"]
+    assert list(indexes["uq_username_claims_reservation_attempt"].columns.keys()) == [
+        "registration_attempt_id"
+    ]
 
 
 def test_user_exposes_username_through_permanent_claim_relationship() -> None:

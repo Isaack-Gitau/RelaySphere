@@ -139,6 +139,7 @@ def test_compose_verification_email_rejects_missing_required_fields(
     with pytest.raises(ValueError):
         compose_verification_email(**arguments)
 
+
 def test_build_email_change_url_encodes_token_and_preserves_query() -> None:
     result = build_email_change_url(
         "https://app.example.test/confirm-email-change?source=settings",
@@ -213,8 +214,7 @@ def test_compose_email_change_email_has_plain_text_and_html_parts() -> None:
     assert "used only once" in plain_text
     assert "current email address will remain unchanged" in plain_text
     assert (
-        "https://app.example.test/confirm-email-change"
-        "?token=test-email-change-token"
+        "https://app.example.test/confirm-email-change?token=test-email-change-token"
     ) in plain_text
 
 

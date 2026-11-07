@@ -537,6 +537,7 @@ def test_deliver_email_job_translates_password_reset_composition_failure(
     assert error.value.transient is False
     assert "Sensitive composition detail" not in str(error.value)
 
+
 def make_email_change_settings():
     return SimpleNamespace(
         email_change_url="https://app.example.test/confirm-email-change",
@@ -655,8 +656,7 @@ def test_deliver_email_change_job_builds_real_confirmation_message(
     plain_text = plain_part.get_content()
     assert "24 hours" in plain_text
     assert (
-        "https://app.example.test/confirm-email-change"
-        "?token=test-email-change-token"
+        "https://app.example.test/confirm-email-change?token=test-email-change-token"
     ) in plain_text
 
 
@@ -738,9 +738,7 @@ def test_email_change_job_rejects_multiple_recipients(
     monkeypatch.setattr(
         delivery,
         "compose_email_change_email",
-        lambda **kwargs: make_message(
-            "new-address@example.test, other@example.test"
-        ),
+        lambda **kwargs: make_message("new-address@example.test, other@example.test"),
     )
 
     with pytest.raises(EmailDeliveryError) as error:
