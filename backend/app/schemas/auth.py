@@ -253,6 +253,7 @@ class ResetPasswordResponse(BaseModel):
 
     message: str
 
+
 class EmailChangeStartRequest(BaseModel):
     """Validate a request to change the authenticated account's email."""
 

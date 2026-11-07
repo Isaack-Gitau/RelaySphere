@@ -271,9 +271,7 @@ def test_email_change_confirmation_rejects_invalid_token(
     )
 
     assert response.status_code == 400
-    assert response.json() == {
-        "detail": "Invalid or expired confirmation token."
-    }
+    assert response.json() == {"detail": "Invalid or expired confirmation token."}
 
     assert db_session.scalar(select(EmailChangeRequest)) is None
 
@@ -305,9 +303,7 @@ def test_email_change_request_is_rate_limited(
     )
 
     assert response.status_code == 429
-    assert response.json() == {
-        "detail": "Too many requests. Please try again later."
-    }
+    assert response.json() == {"detail": "Too many requests. Please try again later."}
     assert response.headers["retry-after"] == "37"
 
     buckets = observed["buckets"]

@@ -52,8 +52,7 @@ class UsernameClaim(Base):
     __table_args__ = (
         UniqueConstraint("username", name="uq_username_claims_username"),
         CheckConstraint(
-            "username ~ '^[a-z][a-z0-9_]{1,28}[a-z0-9]$' "
-            "AND username !~ '__'",
+            "username ~ '^[a-z][a-z0-9_]{1,28}[a-z0-9]$' AND username !~ '__'",
             name="username_format",
         ),
         CheckConstraint(

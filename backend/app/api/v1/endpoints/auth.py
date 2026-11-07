@@ -1069,6 +1069,7 @@ def list_sessions(
 
     return SessionListResponse(sessions=items)
 
+
 @router.post(
     "/email-change/request",
     response_model=EmailChangeStartResponse,
@@ -1142,11 +1143,7 @@ def start_email_change(
 
         now = datetime.now(UTC)
 
-        if (
-            current is None
-            or current.revoked_at is not None
-            or session_is_expired(current, now)
-        ):
+        if current is None or current.revoked_at is not None or session_is_expired(current, now):
             session.rollback()
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,

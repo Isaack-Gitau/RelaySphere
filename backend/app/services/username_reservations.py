@@ -45,13 +45,7 @@ def _acquire_reservation_locks(
     )
 
     for lock_key in lock_keys:
-        session.execute(
-            select(
-                func.pg_advisory_xact_lock(
-                    func.hashtextextended(lock_key, 0)
-                )
-            )
-        )
+        session.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(lock_key, 0))))
 
 
 def create_username_reservation(
@@ -74,9 +68,7 @@ def create_username_reservation(
         raise RuntimeError("Database clock is unavailable.")
 
     username_claim = session.scalar(
-        select(UsernameClaim)
-        .where(UsernameClaim.username == username)
-        .with_for_update()
+        select(UsernameClaim).where(UsernameClaim.username == username).with_for_update()
     )
 
     attempt_claim = session.scalar(
@@ -100,25 +92,18 @@ def create_username_reservation(
 
     if attempt_claim is not None:
         attempt_claim_expired = (
-            attempt_claim.expires_at is not None
-            and attempt_claim.expires_at <= db_now
+            attempt_claim.expires_at is not None and attempt_claim.expires_at <= db_now
         )
 
         if not attempt_claim_expired:
             raise UsernameReservationExistsError
 
     # The two lookups may identify the same expired reservation.
-    expired_claim_ids = {
-        claim.id
-        for claim in (username_claim, attempt_claim)
-        if claim is not None
-    }
+    expired_claim_ids = {claim.id for claim in (username_claim, attempt_claim) if claim is not None}
 
     if expired_claim_ids:
         expired_claims = session.scalars(
-            select(UsernameClaim)
-            .where(UsernameClaim.id.in_(expired_claim_ids))
-            .with_for_update()
+            select(UsernameClaim).where(UsernameClaim.id.in_(expired_claim_ids)).with_for_update()
         ).all()
 
         for claim in expired_claims:

@@ -85,8 +85,4 @@ def suggest_usernames(session: Session, display_name: str) -> list[str]:
 
     unavailable = set(session.scalars(statement).all())
 
-    return [
-        candidate
-        for candidate in candidates
-        if candidate not in unavailable
-    ][:MAX_SUGGESTIONS]
+    return [candidate for candidate in candidates if candidate not in unavailable][:MAX_SUGGESTIONS]
