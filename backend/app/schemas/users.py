@@ -1,7 +1,16 @@
 import uuid
 from datetime import datetime
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    EmailStr,
+    Field,
+    StrictBool,
+    field_validator,
+    model_validator,
+)
 
 
 class UserProfileResponse(BaseModel):
@@ -52,3 +61,29 @@ class ChangeUsernameRequest(BaseModel):
         if "__" in value:
             raise ValueError("Username cannot contain consecutive underscores.")
         return value
+
+
+class PreferencesResponse(BaseModel):
+    """Expose the caller's complete preferences."""
+
+    theme: Literal["system", "light", "dark"]
+    show_presence: bool
+
+
+class UpdatePreferencesRequest(BaseModel):
+    """Validate a partial update of the caller's preferences."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    theme: Literal["system", "light", "dark"] | None = None
+    show_presence: StrictBool | None = None
+
+    @model_validator(mode="after")
+    def require_at_least_one_value(self) -> "UpdatePreferencesRequest":
+        """Reject empty bodies and explicit nulls."""
+        if not self.model_fields_set:
+            raise ValueError("At least one preference must be provided.")
+        for name in self.model_fields_set:
+            if getattr(self, name) is None:
+                raise ValueError(name + " must not be null.")
+        return self
