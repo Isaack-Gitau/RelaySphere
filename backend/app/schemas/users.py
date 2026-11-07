@@ -32,3 +32,23 @@ class UpdateProfileRequest(BaseModel):
         if isinstance(value, str):
             return value.strip()
         return value
+
+
+class ChangeUsernameRequest(BaseModel):
+    """Validate a request to change the caller's username."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    username: str = Field(
+        min_length=3,
+        max_length=30,
+        pattern=r"^[a-z][a-z0-9_]{1,28}[a-z0-9]$",
+    )
+
+    @field_validator("username")
+    @classmethod
+    def reject_consecutive_underscores(cls, value: str) -> str:
+        """Reject usernames containing consecutive underscores."""
+        if "__" in value:
+            raise ValueError("Username cannot contain consecutive underscores.")
+        return value
